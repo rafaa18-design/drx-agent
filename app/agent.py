@@ -1,18 +1,23 @@
 """Agent module using Agno framework.
 
 This module creates and configures the AI agent following AgentBench standard.
-Integrates with Langfuse for observability and prompt management.
+Integrates with:
+- Langfuse for observability and prompt management
+- Redis for session state and cache
+- PostgreSQL for persistent storage
 """
 
+import base64
 import time
+from typing import Any
 
 from agno.agent import Agent, RunOutput
+from agno.media import Audio, File, Image, Video
 from agno.models.anthropic import Claude
 from agno.models.openai import OpenAIChat
 
 from app.config import settings
 from app.langfuse_client import create_trace, flush, get_prompt
-from app.memory import memory
 from app.models import (
     ActionTaken,
     DebugMetrics,
@@ -24,6 +29,12 @@ from app.models import (
     RunDebugResponse,
     RunResponse,
     TrajectoryStage,
+)
+from app.storage import (
+    add_message_to_history,
+    get_postgres_db,
+    get_session_state,
+    update_session_state,
 )
 from app.tools import calculate, get_current_time
 
@@ -37,7 +48,6 @@ def get_model(model_id: str | None = None):
     elif 'gpt' in model_id.lower() or 'o1' in model_id.lower():
         return OpenAIChat(id=model_id)
     else:
-        # Default to Claude
         return Claude(id=settings.DEFAULT_MODEL)
 
 
@@ -53,32 +63,77 @@ def create_agent(
     model_id: str | None = None,
     session_id: str | None = None,
     instructions: str | None = None,
+    session_state: dict[str, Any] | None = None,
 ) -> Agent:
-    """Create an Agno agent with the specified configuration."""
+    """Create an Agno agent with the specified configuration.
+
+    Uses PostgreSQL for persistent storage and enables:
+    - Chat history context
+    - Tool result compression
+    - Agentic state management
+    """
     return Agent(
         model=get_model(model_id),
         tools=[get_current_time, calculate],
         instructions=instructions or get_agent_instructions(),
-        add_history_to_context=True,
+        # Database for persistent storage
+        db=get_postgres_db(),
+        # Session management
         session_id=session_id,
+        session_state=session_state or {},
+        # History and context
+        add_history_to_context=True,
+        num_history_runs=settings.NUM_HISTORY_RUNS,
+        # Optimization
+        compress_tool_results=settings.COMPRESS_TOOL_RESULTS,
+        # Output
         markdown=True,
     )
 
 
-def build_input_message(items: list[InputItem]) -> str:
-    """Build the input message from multimodal items.
+def parse_multimodal_input(
+    items: list[InputItem],
+) -> tuple[str, list[Image], list[Audio], list[Video], list[File]]:
+    """Parse multimodal input items into Agno media objects.
 
-    For now, we only support text. Extend this to handle images, audio, etc.
+    Returns:
+        Tuple of (text_message, images, audios, videos, files)
     """
-    text_parts = []
+    text_parts: list[str] = []
+    images: list[Image] = []
+    audios: list[Audio] = []
+    videos: list[Video] = []
+    files: list[File] = []
+
     for item in items:
         if item.type == 'text':
             text_parts.append(item.content)
-        else:
-            # TODO: Handle other types (image, audio, document, video)
-            # For now, just note that we received them
-            text_parts.append(f'[{item.type}: {item.filename or "unnamed"}]')
-    return '\n'.join(text_parts)
+
+        elif item.type == 'image':
+            # Content is base64 encoded
+            content_bytes = base64.b64decode(item.content)
+            images.append(Image(content=content_bytes))
+
+        elif item.type == 'audio':
+            content_bytes = base64.b64decode(item.content)
+            audio_format = 'wav'
+            if item.mime_type:
+                # Extract format from mime_type (e.g., audio/mp3 -> mp3)
+                audio_format = item.mime_type.split('/')[-1]
+            audios.append(Audio(content=content_bytes, format=audio_format))
+
+        elif item.type == 'video':
+            content_bytes = base64.b64decode(item.content)
+            videos.append(Video(content=content_bytes))
+
+        elif item.type == 'document':
+            content_bytes = base64.b64decode(item.content)
+            files.append(
+                File(content=content_bytes, name=item.filename or 'document')
+            )
+
+    text_message = '\n'.join(text_parts) if text_parts else ''
+    return text_message, images, audios, videos, files
 
 
 def extract_actions_from_response(response: RunOutput) -> list[ActionTaken]:
@@ -127,25 +182,44 @@ async def run_agent(
         tags=['production', 'run'],
     )
 
-    # Get or create conversation
-    conv = memory.get_or_create(conversation_id)
+    # Get session state from Redis
+    session_state = await get_session_state(conversation_id)
 
-    # Build input message
-    user_message = build_input_message(items)
+    # Parse multimodal input
+    text_message, images, audios, videos, files = parse_multimodal_input(items)
 
-    # Create agent with session for conversation continuity
+    # Create agent with session state
     agent = create_agent(
         model_id=model,
         session_id=conversation_id,
         instructions=instructions,
+        session_state=session_state,
     )
 
-    # Run the agent
-    response: RunOutput = await agent.arun(user_message)
+    # Build run kwargs for multimodal content
+    run_kwargs: dict[str, Any] = {}
+    if images:
+        run_kwargs['images'] = images
+    if audios:
+        run_kwargs['audio'] = audios
+    if videos:
+        run_kwargs['videos'] = videos
+    if files:
+        run_kwargs['files'] = files
 
-    # Store messages in memory
-    memory.add_message(conversation_id, 'user', user_message)
-    memory.add_message(conversation_id, 'assistant', response.content or '')
+    # Run the agent
+    response: RunOutput = await agent.arun(text_message, **run_kwargs)
+
+    # Store messages in Redis history
+    await add_message_to_history(conversation_id, 'user', text_message)
+    await add_message_to_history(
+        conversation_id, 'assistant', response.content or ''
+    )
+
+    # Update session state in Redis if changed
+    if hasattr(response, 'session_state') and response.session_state:
+        await update_session_state(conversation_id, response.session_state)
+        session_state = response.session_state
 
     # Calculate metrics
     latency_ms = (time.perf_counter() - start_time) * 1000
@@ -156,7 +230,7 @@ async def run_agent(
     # Update trace with output
     if trace:
         trace.update(
-            input={'message': user_message},
+            input={'message': text_message},
             output={'response': response.content or ''},
             metadata={
                 'latency_ms': latency_ms,
@@ -174,7 +248,7 @@ async def run_agent(
         conversation_id=conversation_id,
         final_output=FinalOutput(
             message=response.content or '',
-            state=conv.state if conv.state else None,
+            state=session_state if session_state else None,
             actions_taken=actions if actions else None,
         ),
         metrics=Metrics(
@@ -217,25 +291,44 @@ async def run_agent_debug(
         tags=['debug', 'run_debug'],
     )
 
-    # Get or create conversation
-    conv = memory.get_or_create(conversation_id)
+    # Get session state from Redis
+    session_state = await get_session_state(conversation_id)
 
-    # Build input message
-    user_message = build_input_message(items)
+    # Parse multimodal input
+    text_message, images, audios, videos, files = parse_multimodal_input(items)
 
-    # Create agent
+    # Create agent with session state
     agent = create_agent(
         model_id=model,
         session_id=conversation_id,
         instructions=instructions,
+        session_state=session_state,
     )
 
-    # Run the agent
-    response: RunOutput = await agent.arun(user_message)
+    # Build run kwargs for multimodal content
+    run_kwargs: dict[str, Any] = {}
+    if images:
+        run_kwargs['images'] = images
+    if audios:
+        run_kwargs['audio'] = audios
+    if videos:
+        run_kwargs['videos'] = videos
+    if files:
+        run_kwargs['files'] = files
 
-    # Store messages in memory
-    memory.add_message(conversation_id, 'user', user_message)
-    memory.add_message(conversation_id, 'assistant', response.content or '')
+    # Run the agent
+    response: RunOutput = await agent.arun(text_message, **run_kwargs)
+
+    # Store messages in Redis history
+    await add_message_to_history(conversation_id, 'user', text_message)
+    await add_message_to_history(
+        conversation_id, 'assistant', response.content or ''
+    )
+
+    # Update session state in Redis if changed
+    if hasattr(response, 'session_state') and response.session_state:
+        await update_session_state(conversation_id, response.session_state)
+        session_state = response.session_state
 
     # Calculate metrics
     latency_ms = (time.perf_counter() - start_time) * 1000
@@ -250,7 +343,7 @@ async def run_agent_debug(
     # Update trace with output
     if trace:
         trace.update(
-            input={'message': user_message},
+            input={'message': text_message},
             output={'response': response.content or ''},
             metadata={
                 'latency_ms': latency_ms,
@@ -289,7 +382,7 @@ async def run_agent_debug(
         conversation_id=conversation_id,
         final_output=FinalOutput(
             message=response.content or '',
-            state=conv.state if conv.state else None,
+            state=session_state if session_state else None,
             actions_taken=actions if actions else None,
         ),
         trajectory=trajectory,

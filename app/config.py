@@ -20,6 +20,18 @@ class Settings(BaseSettings):
     AGENT_PROMPT_NAME: str = 'agent-instructions'
     AGENT_INSTRUCTIONS_FALLBACK: str = 'You are a helpful AI assistant.'
     MAX_TURNS: int = 10
+    NUM_HISTORY_RUNS: int = 10
+    COMPRESS_TOOL_RESULTS: bool = True
+
+    # Redis configuration (session state, cache)
+    REDIS_URL: str = 'redis://localhost:6379/0'
+    REDIS_SESSION_TTL: int = 86400  # 24 hours
+    REDIS_CACHE_TTL: int = 3600  # 1 hour
+
+    # PostgreSQL configuration (persistent storage)
+    POSTGRES_URL: str = (
+        'postgresql+psycopg://user:password@localhost:5432/agentdb'
+    )
 
     # Langfuse configuration
     LANGFUSE_PUBLIC_KEY: str = ''

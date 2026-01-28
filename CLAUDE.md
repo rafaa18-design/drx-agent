@@ -2,7 +2,12 @@
 
 ## Overview
 
-This is an **AI Agent Module Template** that follows the **AgentBench Standard**. It uses the **Agno** framework for agent implementation, **FastAPI** for the API layer, and **Langfuse** for observability and prompt management.
+This is an **AI Agent Module Template** that follows the **AgentBench Standard**. It uses:
+- **Agno** framework for agent implementation
+- **FastAPI** for the API layer
+- **Langfuse** for observability and prompt management
+- **Redis** for session state and cache
+- **PostgreSQL** for persistent storage
 
 ## Project Structure
 
@@ -13,7 +18,7 @@ asani-ai-agent-template/
 │   ├── main.py              # FastAPI app with AgentBench endpoints
 │   ├── agent.py             # Agno agent configuration
 │   ├── models.py            # Pydantic models (AgentBench standard)
-│   ├── memory.py            # Conversation memory management
+│   ├── storage.py           # Redis & PostgreSQL backends
 │   ├── config.py            # Application settings
 │   ├── langfuse_client.py   # Langfuse integration
 │   └── tools/               # Custom tools
@@ -32,9 +37,6 @@ uv sync
 
 # Run development server
 uv run uvicorn app.main:app --reload
-
-# Run with Python directly
-uv run python -m app.main
 
 # Run tests
 uv run pytest
@@ -60,33 +62,48 @@ This template implements the three required endpoints:
 ```json
 {
   "input": [
-    { "type": "text", "content": "Hello!" }
+    { "type": "text", "content": "Hello!" },
+    { "type": "image", "content": "base64...", "mime_type": "image/png" }
   ],
   "conversation_id": "conv_123",
   "model": "claude-sonnet-4-20250514"
 }
 ```
 
-### Response Format (/run)
+### Supported Input Types
 
-```json
-{
-  "conversation_id": "conv_123",
-  "final_output": {
-    "message": "Hello! How can I help you?",
-    "state": {},
-    "actions_taken": []
-  },
-  "metrics": {
-    "latency_ms": 320,
-    "tokens_used": 57
-  }
-}
+| Type | Formats |
+|------|---------|
+| text | Plain text |
+| image | jpeg, jpg, png, webp |
+| audio | mp3, wav, ogg |
+| video | mp4, webm |
+| document | pdf, txt, md, json, docx, csv |
+
+## Storage Architecture
+
+### Redis (Session & Cache)
+
+Used for fast, ephemeral data:
+- **Session state**: Per-conversation state that persists across requests
+- **Message history**: Recent messages for context (configurable via `NUM_HISTORY_RUNS`)
+- **Cache**: Temporary data with TTL
+
+```python
+# Redis keys structure
+session:{conversation_id}:state   # Session state JSON
+session:{conversation_id}:history # Message list
+cache:{key}                       # Cached values
 ```
 
-## Langfuse Integration
+### PostgreSQL (Persistent Storage)
 
-The template integrates with [Langfuse](https://langfuse.com) for:
+Used for durable data via Agno's PostgresDb:
+- Agent run history
+- Long-term conversation storage
+- Audit logs
+
+## Langfuse Integration
 
 ### Observability (Tracing)
 
@@ -94,33 +111,14 @@ Every `/run` and `/run_debug` call creates a trace in Langfuse with:
 - Session ID (conversation_id)
 - Input/output messages
 - Latency and token metrics
-- Tags for filtering (production/debug)
+- Tags for filtering
 
 ### Prompt Management
 
-Instead of hardcoding prompts, manage them in Langfuse:
-
-1. **Create a prompt in Langfuse UI** named `agent-instructions`
-2. **Add the `production` label** to the version you want to use
+Prompts are fetched from Langfuse by name:
+1. Create a prompt in Langfuse UI named `agent-instructions`
+2. Add the `production` label to the version you want
 3. The agent automatically fetches the latest production prompt
-
-Variables are supported using `{{variableName}}` syntax.
-
-### Configuration
-
-```bash
-# .env
-LANGFUSE_PUBLIC_KEY=pk-lf-...
-LANGFUSE_SECRET_KEY=sk-lf-...
-LANGFUSE_BASE_URL=https://cloud.langfuse.com
-LANGFUSE_ENABLED=true
-
-# Prompt configuration
-AGENT_PROMPT_NAME=agent-instructions
-AGENT_INSTRUCTIONS_FALLBACK=You are a helpful AI assistant.
-```
-
-If Langfuse is not configured or unavailable, the fallback prompt is used.
 
 ## Customization
 
@@ -149,20 +147,21 @@ def create_agent(...):
     )
 ```
 
-### Changing the Model
+### Session State
 
-Set the `DEFAULT_MODEL` environment variable or pass `model` in the request.
+The agent can maintain state across conversation turns:
 
-Supported models:
-- Claude: `claude-sonnet-4-20250514`, `claude-3-5-sonnet-20241022`
-- OpenAI: `gpt-4o`, `gpt-4-turbo`
+```python
+from agno.run import RunContext
 
-### Persistent Memory
-
-For production, replace the in-memory storage in `app/memory.py` with:
-- Redis for distributed cache
-- PostgreSQL with Agno's `PostgresDb`
-- Any other database backend
+@tool
+def add_to_cart(run_context: RunContext, item: str) -> str:
+    """Add item to shopping cart."""
+    cart = run_context.session_state.get("cart", [])
+    cart.append(item)
+    run_context.session_state["cart"] = cart
+    return f"Added {item} to cart"
+```
 
 ## Environment Variables
 
@@ -175,9 +174,47 @@ For production, replace the in-memory storage in `app/memory.py` with:
 | `OPENAI_API_KEY` | OpenAI API key | - |
 | `AGENT_PROMPT_NAME` | Langfuse prompt name | `agent-instructions` |
 | `AGENT_INSTRUCTIONS_FALLBACK` | Fallback prompt | `You are a helpful AI assistant.` |
+| `NUM_HISTORY_RUNS` | Conversations in context | `10` |
+| `COMPRESS_TOOL_RESULTS` | Compress tool outputs | `true` |
+| `REDIS_URL` | Redis connection URL | `redis://localhost:6379/0` |
+| `REDIS_SESSION_TTL` | Session TTL (seconds) | `86400` |
+| `REDIS_CACHE_TTL` | Cache TTL (seconds) | `3600` |
+| `POSTGRES_URL` | PostgreSQL connection URL | - |
 | `LANGFUSE_PUBLIC_KEY` | Langfuse public key | - |
 | `LANGFUSE_SECRET_KEY` | Langfuse secret key | - |
 | `LANGFUSE_BASE_URL` | Langfuse API URL | `https://cloud.langfuse.com` |
 | `LANGFUSE_ENABLED` | Enable Langfuse | `true` |
 | `HOST` | Server host | `0.0.0.0` |
 | `PORT` | Server port | `8000` |
+
+## Docker Compose Example
+
+```yaml
+version: '3.8'
+
+services:
+  agent:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - POSTGRES_URL=postgresql+psycopg://agent:secret@postgres:5432/agentdb
+    depends_on:
+      - redis
+      - postgres
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: agentdb
+    ports:
+      - "5432:5432"
+```

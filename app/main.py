@@ -5,9 +5,13 @@ FastAPI application exposing the three required AgentBench endpoints:
 - POST /run - Production execution
 - POST /run_debug - Debug execution with full trajectory
 
-Integrates with Langfuse for observability and prompt management.
+Integrates with:
+- Langfuse for observability and prompt management
+- Redis for session state and cache
+- PostgreSQL for persistent storage
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -28,16 +32,28 @@ from app.models import (
     RunResponse,
     ToolExposed,
 )
+from app.storage import close_redis, get_redis
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    # Startup: initialize Langfuse
+    # Startup
     get_langfuse()
+    try:
+        await get_redis()
+        logger.info('Storage backends initialized')
+    except Exception as e:
+        logger.warning(f'Redis not available: {e}')
+
     yield
-    # Shutdown: cleanup Langfuse
+
+    # Shutdown
+    await close_redis()
     langfuse_shutdown()
+    logger.info('Application shutdown complete')
 
 
 app = FastAPI(
@@ -92,8 +108,13 @@ async def get_metadata() -> MetadataResponse:
             ),
         ],
         input_types=InputTypes(
-            supported_types=['text'],
-            allowed_formats=None,
+            supported_types=['text', 'image', 'audio', 'video', 'document'],
+            allowed_formats={
+                'image': ['jpeg', 'jpg', 'png', 'webp'],
+                'audio': ['mp3', 'wav', 'ogg'],
+                'video': ['mp4', 'webm'],
+                'document': ['pdf', 'txt', 'md', 'json', 'docx', 'csv'],
+            },
         ),
         models_supported=[
             'claude-sonnet-4-20250514',
