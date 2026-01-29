@@ -3,7 +3,7 @@
 This module defines the Pydantic models for AgentBench-compliant AI modules.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -11,11 +11,14 @@ from pydantic import BaseModel, Field
 # Input Models
 # =============================================================================
 
+# Supported input types for multimodal content
+InputType = Literal['text', 'image', 'audio', 'document', 'video']
+
 
 class InputItem(BaseModel):
     """Multimodal input item for agent requests."""
 
-    type: str = Field(
+    type: InputType = Field(
         ..., description='Content type: text, image, audio, document, video'
     )
     content: str = Field(

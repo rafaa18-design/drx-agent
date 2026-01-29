@@ -9,22 +9,36 @@ wheels/
 # Virtual environments
 .venv
 
-# Environment
-.env
-.env.local
-.env.*.local
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# IDE
-.idea/
+# IDE-specific files
 .vscode/
-*.swp
-*.swo
+.idea/
+
+# environment variables
+.env
+.env.*
+!.env.example
+
+# Claude Code
+.claude/
+.serena/
+
+# uv
+*.lock
+
+# ruff
+.ruff_cache/
+
+# pytest
+.pytest_cache/
+
+# NextJS / Fumadocs (docs-site)
+.next/
+.source/
+out/
+
+# Node modules
+node_modules/
 
 # Misc
-*.log
 .DS_Store
+*.log

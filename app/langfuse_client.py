@@ -123,41 +123,29 @@ def get_chat_prompt(
         return fallback or []
 
 
-def create_trace(
-    name: str,
+def update_trace_metadata(
     user_id: str | None = None,
     session_id: str | None = None,
     metadata: dict[str, Any] | None = None,
     tags: list[str] | None = None,
 ):
-    """Create a new trace in Langfuse.
+    """Update the current Langfuse trace with metadata.
 
-    Args:
-        name: Name of the trace
-        user_id: Optional user identifier
-        session_id: Optional session/conversation identifier
-        metadata: Optional metadata dictionary
-        tags: Optional list of tags
-
-    Returns:
-        The trace object or None if Langfuse is unavailable
+    Must be called within a function decorated with @observe().
     """
     langfuse = get_langfuse()
-
     if langfuse is None:
-        return None
+        return
 
     try:
-        return langfuse.trace(
-            name=name,
+        langfuse.update_current_trace(
             user_id=user_id,
             session_id=session_id,
             metadata=metadata or {},
             tags=tags or [],
         )
     except Exception as e:
-        logger.error(f'Failed to create trace: {e}')
-        return None
+        logger.warning(f'Failed to update trace metadata: {e}')
 
 
 def flush():
