@@ -24,6 +24,7 @@ from app.tools import (
     consultar_convenios,
     consultar_historico_paciente,
     listar_servicos,
+    obter_data_hora,
     salvar_dados_cliente,
     salvar_preferencias,
     ver_contexto_sessao,
@@ -80,12 +81,11 @@ def get_model(model_id: str | None = None):
             reasoning_effort=settings.REASONING_EFFORT,
         )
 
-    # Default to Claude
-    return Claude(
+    # Default to configured DEFAULT_MODEL (OpenAI)
+    return OpenAIChat(
         id=settings.DEFAULT_MODEL,
-        api_key=settings.ANTHROPIC_API_KEY or None,
-        cache_system_prompt=settings.CACHE_SYSTEM_PROMPT,
-        max_tokens=settings.MAX_OUTPUT_TOKENS,
+        api_key=settings.OPENAI_API_KEY or None,
+        max_completion_tokens=settings.MAX_OUTPUT_TOKENS,
     )
 
 
@@ -131,6 +131,7 @@ def create_agent(
             salvar_dados_cliente,
             salvar_preferencias,
             ver_contexto_sessao,
+            obter_data_hora,
         ],
         # Instructions (can be dynamic from Langfuse)
         instructions=instructions or get_agent_instructions(),

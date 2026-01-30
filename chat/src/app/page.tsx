@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown, { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -123,12 +124,27 @@ interface Metrics {
   tokens_used: number;
 }
 
+interface DebugData {
+  trajectory?: unknown[];
+  metrics?: unknown;
+  [key: string]: unknown;
+}
+
+interface AttachedFile {
+  name: string;
+  mime: string;
+  base64: string;
+  type: string;
+}
+
 interface Message {
   id: string;
   role: "user" | "agent";
   content: string;
   actions?: ActionTaken[];
   metrics?: Metrics;
+  debugData?: DebugData;
+  file?: { name: string; mime: string };
 }
 
 // =============================================================================
@@ -193,6 +209,63 @@ function MoonIcon({ size = 16 }: { size?: number }) {
   );
 }
 
+function InfoIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 16v-4M12 8h.01" />
+    </svg>
+  );
+}
+
+function ChevronIcon({ size = 12, open }: { size?: number; open: boolean }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{
+        transition: "transform 0.2s",
+        transform: open ? "rotate(90deg)" : "rotate(0deg)",
+      }}
+    >
+      <path d="M9 18l6-6-6-6" />
+    </svg>
+  );
+}
+
+function CloseIcon({ size = 10 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 6L6 18M6 6l12 12" />
+    </svg>
+  );
+}
+
+function ImageIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+      <circle cx="8.5" cy="8.5" r="1.5" />
+      <path d="M21 15l-5-5L5 21" />
+    </svg>
+  );
+}
+
+function FileIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+      <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
+    </svg>
+  );
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -204,6 +277,14 @@ function uuid(): string {
 function formatLatency(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
 }
+
+const IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico"]);
+function isImageFile(name: string): boolean {
+  const ext = name.split(".").pop()?.toLowerCase() || "";
+  return IMAGE_EXTS.has(ext);
+}
+
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
 
 // =============================================================================
 // Markdown Components (dynamic per theme)
@@ -381,11 +462,474 @@ function SuggestionPills({ c, onSelect }: { c: ColorTokens; onSelect: (text: str
 }
 
 // =============================================================================
+// Debug Panel
+// =============================================================================
+
+function DebugField({ label, c, children, mono }: { label: string; c: ColorTokens; children: React.ReactNode; mono?: boolean }) {
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ fontSize: 10, fontWeight: 600, color: c.textTertiary, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 2 }}>
+        {label}
+      </div>
+      <div style={{
+        fontSize: 12,
+        color: c.text,
+        lineHeight: 1.5,
+        ...(mono ? { fontFamily: "monospace", fontSize: 11, whiteSpace: "pre-wrap" as const, wordBreak: "break-all" as const } : {}),
+      }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function StageLLMInfo({ llmCalls, c }: { llmCalls: Record<string, unknown>[]; c: ColorTokens }) {
+  if (!llmCalls.length) return null;
+  const call = llmCalls[0];
+  return (
+    <>
+      {call.model && <DebugField label="Modelo" c={c}>{String(call.model)}</DebugField>}
+      <DebugField label="Tokens" c={c}>
+        {Number(call.input_tokens ?? 0)} input / {Number(call.output_tokens ?? 0)} output
+      </DebugField>
+    </>
+  );
+}
+
+function StageDetail({ s, c }: { s: Record<string, unknown>; c: ColorTokens }) {
+  const stageId = s.stage_id as string;
+  const promptDebug = s.prompt_debug as Record<string, unknown> | undefined;
+  const llmCalls = Array.isArray(s.llm_calls) ? s.llm_calls as Record<string, unknown>[] : [];
+  const output = s.output as Record<string, unknown> | undefined;
+  const errors = Array.isArray(s.errors) ? s.errors as string[] : [];
+  const [showPrompt, setShowPrompt] = useState(false);
+
+  const sectionStyle: React.CSSProperties = {
+    padding: 12,
+    borderRadius: 8,
+    background: c.codeBg,
+    marginTop: 8,
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+  };
+
+  const divider: React.CSSProperties = {
+    height: 1,
+    background: c.border,
+    margin: "2px 0",
+  };
+
+  const prompt = typeof promptDebug?.final_system_prompt_used === "string"
+    ? promptDebug.final_system_prompt_used : null;
+
+  if (stageId === "intent") {
+    const stageVal = output?.stage as string | undefined;
+    const toolCalls = Array.isArray(output?.tool_calls) ? output.tool_calls as string[] : [];
+    const reasoning = output?.reasoning as string | undefined;
+
+    return (
+      <div style={sectionStyle}>
+        <StageLLMInfo llmCalls={llmCalls} c={c} />
+        <div style={divider} />
+        <DebugField label="Output" c={c}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 2 }}>
+            {stageVal && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 11, color: c.textTertiary, minWidth: 40 }}>stage:</span>
+                <span style={{ padding: "1px 8px", borderRadius: 4, fontSize: 11, fontWeight: 600, background: c.bgSubtle, color: c.text }}>{stageVal}</span>
+              </div>
+            )}
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+              <span style={{ fontSize: 11, color: c.textTertiary, minWidth: 40, paddingTop: 2 }}>tools:</span>
+              {toolCalls.length > 0 ? (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {toolCalls.map((t, i) => (
+                    <span key={i} style={{ padding: "2px 6px", borderRadius: 4, fontSize: 11, background: c.bgSubtle, color: c.textSecondary }}>{String(t)}</span>
+                  ))}
+                </div>
+              ) : (
+                <span style={{ fontSize: 11, color: c.textTertiary }}>nenhuma</span>
+              )}
+            </div>
+            {reasoning && (
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+                <span style={{ fontSize: 11, color: c.textTertiary, minWidth: 40, paddingTop: 1 }}>razao:</span>
+                <span style={{ fontSize: 11, color: c.text }}>{reasoning}</span>
+              </div>
+            )}
+          </div>
+        </DebugField>
+        {prompt && (
+          <>
+            <div style={divider} />
+            <button onClick={() => setShowPrompt(!showPrompt)} style={{
+              background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
+              fontSize: 11, color: c.textTertiary, textAlign: "left", padding: 0,
+              display: "flex", alignItems: "center", gap: 4,
+            }}>
+              <ChevronIcon size={9} open={showPrompt} />
+              System prompt
+            </button>
+            {showPrompt && (
+              <pre style={{ fontSize: 10, lineHeight: 1.4, color: c.textSecondary, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 200, overflow: "auto", margin: 0, padding: 8, borderRadius: 6, background: c.bgSubtle }}>
+                {prompt}
+              </pre>
+            )}
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (stageId === "executor") {
+    const toolsExecuted = Array.isArray(output?.tools_executed) ? output.tools_executed as Record<string, unknown>[] : [];
+    const stateUpdated = output?.state_updated as boolean | undefined;
+
+    return (
+      <div style={sectionStyle}>
+        <DebugField label="LLM calls" c={c}>0 (execucao deterministica)</DebugField>
+        <div style={divider} />
+        <DebugField label="Output" c={c}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 2 }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+              <span style={{ fontSize: 11, color: c.textTertiary, minWidth: 80, paddingTop: 2 }}>tools exec:</span>
+              {toolsExecuted.length > 0 ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                  {toolsExecuted.map((t, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{
+                        padding: "2px 6px", borderRadius: 4, fontSize: 11, fontWeight: 500,
+                        background: t.success ? c.chipSuccess : c.errorBg,
+                        color: t.success ? c.chipSuccessText : c.error,
+                      }}>
+                        {t.success ? "✓" : "✗"} {String(t.tool)}
+                      </span>
+                      {typeof t.error === "string" && t.error && (
+                        <span style={{ fontSize: 11, color: c.error }}>{t.error}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <span style={{ fontSize: 11, color: c.textTertiary }}>nenhuma</span>
+              )}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 11, color: c.textTertiary, minWidth: 80 }}>state updated:</span>
+              <span style={{ fontSize: 11, color: c.text }}>{stateUpdated ? "sim" : "nao"}</span>
+            </div>
+          </div>
+        </DebugField>
+      </div>
+    );
+  }
+
+  if (stageId === "writer") {
+    const msg = output?.message as string | undefined;
+    const stageVal = typeof promptDebug?.state_value === "string" ? promptDebug.state_value : null;
+
+    return (
+      <div style={sectionStyle}>
+        <StageLLMInfo llmCalls={llmCalls} c={c} />
+        {stageVal && (
+          <DebugField label="Stage do prompt" c={c}>
+            <span style={{ padding: "1px 8px", borderRadius: 4, fontSize: 11, fontWeight: 600, background: c.bgSubtle, color: c.text }}>{stageVal}</span>
+          </DebugField>
+        )}
+        <div style={divider} />
+        <DebugField label="Output" c={c}>
+          {msg ? (
+            <div style={{ fontSize: 12, color: c.text, lineHeight: 1.5, maxHeight: 120, overflow: "auto" }}>{msg}</div>
+          ) : (
+            <span style={{ fontSize: 11, color: c.textTertiary }}>(vazio)</span>
+          )}
+        </DebugField>
+        {prompt && (
+          <>
+            <div style={divider} />
+            <button onClick={() => setShowPrompt(!showPrompt)} style={{
+              background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
+              fontSize: 11, color: c.textTertiary, textAlign: "left", padding: 0,
+              display: "flex", alignItems: "center", gap: 4,
+            }}>
+              <ChevronIcon size={9} open={showPrompt} />
+              System prompt completo
+            </button>
+            {showPrompt && (
+              <pre style={{ fontSize: 10, lineHeight: 1.4, color: c.textSecondary, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 250, overflow: "auto", margin: 0, padding: 8, borderRadius: 6, background: c.bgSubtle }}>
+                {prompt}
+              </pre>
+            )}
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // Fallback for unknown stages
+  return (
+    <div style={sectionStyle}>
+      {llmCalls.length > 0 && llmCalls.map((call, i) => (
+        <DebugField key={i} label={`LLM Call ${i + 1}`} c={c}>
+          {String(call.model)} — {Number(call.input_tokens ?? 0)} in / {Number(call.output_tokens ?? 0)} out
+        </DebugField>
+      ))}
+      {output != null && <DebugField label="Output" c={c} mono>{JSON.stringify(output, null, 2)}</DebugField>}
+      {prompt && <DebugField label="System prompt" c={c} mono>{prompt}</DebugField>}
+      {errors.length > 0 && <DebugField label="Erros" c={c}>{errors.join(", ")}</DebugField>}
+    </div>
+  );
+}
+
+function DebugModal({ data, c, onClose }: { data: DebugData; c: ColorTokens; onClose: () => void }) {
+  const [expandedStages, setExpandedStages] = useState<Set<number>>(new Set());
+  const [viewMode, setViewMode] = useState<"structured" | "json">("structured");
+
+  const toggleStage = (idx: number) => {
+    setExpandedStages((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  };
+
+  const trajectory = Array.isArray(data.trajectory) ? data.trajectory : [];
+  const metrics = data.metrics as Record<string, unknown> | undefined;
+
+  // Close on Escape
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const tabStyle = (active: boolean): React.CSSProperties => ({
+    padding: "4px 10px",
+    fontSize: 11,
+    fontWeight: 500,
+    fontFamily: "inherit",
+    border: "none",
+    borderRadius: 6,
+    cursor: "pointer",
+    color: active ? c.text : c.textTertiary,
+    background: active ? c.bgSubtle : "transparent",
+    transition: "all 0.15s",
+  });
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 9999,
+        background: "rgba(0,0,0,0.6)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 20,
+        animation: "fade-in 0.15s ease-out both",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "100%",
+          maxWidth: 600,
+          maxHeight: "85vh",
+          borderRadius: 14,
+          background: c.bgElevated,
+          border: `1px solid ${c.border}`,
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          animation: "modal-in 0.2s cubic-bezier(0.16,1,0.3,1) both",
+          boxShadow: "0 20px 60px rgba(0,0,0,0.4)",
+        }}
+      >
+        {/* Header */}
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "12px 18px",
+          borderBottom: `1px solid ${c.border}`,
+          flexShrink: 0,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: c.text }}>Run Debug</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 2, padding: 2, borderRadius: 8, background: c.codeBg }}>
+              <button onClick={() => setViewMode("structured")} style={tabStyle(viewMode === "structured")}>
+                Estruturado
+              </button>
+              <button onClick={() => setViewMode("json")} style={tabStyle(viewMode === "json")}>
+                JSON
+              </button>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: 6,
+              border: "none",
+              background: "transparent",
+              color: c.textSecondary,
+              cursor: "pointer",
+              fontSize: 16,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontFamily: "inherit",
+            }}
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Body */}
+        <div style={{ overflow: "auto", padding: 18, fontSize: 12, lineHeight: 1.5, color: c.textSecondary }}>
+          {viewMode === "json" ? (
+            <pre style={{
+              margin: 0,
+              overflow: "auto",
+              fontSize: 11,
+              lineHeight: 1.4,
+              color: c.textSecondary,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+              fontFamily: "monospace",
+              padding: 12,
+              borderRadius: 8,
+              background: c.codeBg,
+            }}>
+              {JSON.stringify(data, null, 2)}
+            </pre>
+          ) : (
+            <>
+              {/* Metrics summary */}
+              {metrics && (
+                <div style={{
+                  marginBottom: trajectory.length ? 16 : 0,
+                  padding: 12,
+                  borderRadius: 8,
+                  background: c.codeBg,
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: 16,
+                }}>
+                  {typeof metrics.total_latency_ms === "number" && (
+                    <div>
+                      <div style={{ fontSize: 10, fontWeight: 600, color: c.textTertiary, textTransform: "uppercase", letterSpacing: "0.05em" }}>Latencia total</div>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: c.text, marginTop: 2 }}>{formatLatency(metrics.total_latency_ms as number)}</div>
+                    </div>
+                  )}
+                  {typeof metrics.total_tokens === "object" && metrics.total_tokens !== null && (() => {
+                    const t = metrics.total_tokens as Record<string, number>;
+                    return (
+                      <div>
+                        <div style={{ fontSize: 10, fontWeight: 600, color: c.textTertiary, textTransform: "uppercase", letterSpacing: "0.05em" }}>Tokens</div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: c.text, marginTop: 2 }}>{t.input ?? 0} in / {t.output ?? 0} out</div>
+                      </div>
+                    );
+                  })()}
+                  {typeof metrics.llm_calls === "number" && (
+                    <div>
+                      <div style={{ fontSize: 10, fontWeight: 600, color: c.textTertiary, textTransform: "uppercase", letterSpacing: "0.05em" }}>LLM calls</div>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: c.text, marginTop: 2 }}>{metrics.llm_calls as number}</div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Trajectory stages */}
+              {trajectory.map((stage: unknown, idx: number) => {
+                const s = stage as Record<string, unknown>;
+                const isExpanded = expandedStages.has(idx);
+                return (
+                  <div key={idx} style={{ marginTop: idx === 0 ? 0 : 8 }}>
+                    <button
+                      onClick={() => toggleStage(idx)}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        width: "100%",
+                        padding: "8px 0",
+                        background: "none",
+                        border: "none",
+                        cursor: "pointer",
+                        fontFamily: "inherit",
+                        fontSize: 12,
+                        color: c.text,
+                        textAlign: "left",
+                        borderTop: idx > 0 ? `1px solid ${c.border}` : "none",
+                      }}
+                    >
+                      <ChevronIcon size={11} open={isExpanded} />
+                      <span style={{ fontSize: 11, fontWeight: 700, color: c.textSecondary, minWidth: 16 }}>{(s.sequence as number) ?? idx + 1}.</span>
+                      <span style={{
+                        display: "inline-block",
+                        padding: "2px 8px",
+                        borderRadius: 4,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        background: s.type === "executor" ? c.chipSuccess : c.bgSubtle,
+                        color: s.type === "executor" ? c.chipSuccessText : c.textSecondary,
+                      }}>
+                        {(s.stage_id as string) || `Stage ${idx + 1}`}
+                      </span>
+                      <span style={{ color: c.textTertiary, fontSize: 11 }}>
+                        {s.type as string}
+                      </span>
+                      {typeof s.latency_ms === "number" && (
+                        <span style={{ marginLeft: "auto", color: c.textTertiary, fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
+                          {formatLatency(s.latency_ms as number)}
+                        </span>
+                      )}
+                    </button>
+
+                    {isExpanded && <StageDetail s={s} c={c} />}
+                  </div>
+                );
+              })}
+
+              {/* Fallback: raw JSON if no trajectory */}
+              {!trajectory.length && !metrics && (
+                <pre style={{
+                  margin: 0,
+                  overflow: "auto",
+                  fontSize: 11,
+                  lineHeight: 1.4,
+                  color: c.textSecondary,
+                  maxHeight: 400,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-all",
+                }}>
+                  {JSON.stringify(data, null, 2)}
+                </pre>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =============================================================================
 // Chat Message
 // =============================================================================
 
 function ChatMessage({ msg, c, mdComponents }: { msg: Message; c: ColorTokens; mdComponents: Components }) {
   const isUser = msg.role === "user";
+  const [showDebug, setShowDebug] = useState(false);
 
   return (
     <div style={{ animation: "msg-in 0.28s ease-out both" }}>
@@ -407,7 +951,24 @@ function ChatMessage({ msg, c, mdComponents }: { msg: Message; c: ColorTokens; m
           wordBreak: "break-word" as const,
         }}>
           {isUser ? (
-            <span style={{ whiteSpace: "pre-wrap" }}>{msg.content}</span>
+            <div>
+              {msg.file && (
+                <div style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "6px 10px",
+                  background: "rgba(255, 255, 255, 0.15)",
+                  borderRadius: 8,
+                  fontSize: 12,
+                  marginBottom: msg.content ? 6 : 0,
+                }}>
+                  {isImageFile(msg.file.name) ? <ImageIcon size={14} /> : <FileIcon size={14} />}
+                  {msg.file.name}
+                </div>
+              )}
+              {msg.content && <div style={{ whiteSpace: "pre-wrap" }}>{msg.content}</div>}
+            </div>
           ) : (
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
               {msg.content}
@@ -416,8 +977,8 @@ function ChatMessage({ msg, c, mdComponents }: { msg: Message; c: ColorTokens; m
         </div>
       </div>
 
-      {/* Tool chips + metrics */}
-      {!isUser && (msg.actions?.length || msg.metrics) && (
+      {/* Tool chips + debug button */}
+      {!isUser && (msg.actions?.length || msg.debugData) && (
         <div style={{
           display: "flex",
           flexWrap: "wrap",
@@ -443,17 +1004,44 @@ function ChatMessage({ msg, c, mdComponents }: { msg: Message; c: ColorTokens; m
               {a.tool}
             </span>
           ))}
-          {msg.metrics && (
-            <span style={{
-              marginLeft: "auto",
-              fontSize: 11,
-              color: c.textTertiary,
-              fontVariantNumeric: "tabular-nums",
-            }}>
-              {formatLatency(msg.metrics.latency_ms)} · {msg.metrics.tokens_used} tokens
-            </span>
+          {msg.debugData && (
+            <button
+              onClick={() => setShowDebug(true)}
+              style={{
+                marginLeft: "auto",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "3px 8px",
+                borderRadius: 6,
+                fontSize: 11,
+                color: c.textTertiary,
+                background: "transparent",
+                border: `1px solid ${c.border}`,
+                cursor: "pointer",
+                fontFamily: "inherit",
+                transition: "all 0.15s",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.color = c.textSecondary;
+                e.currentTarget.style.borderColor = c.textTertiary;
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.color = c.textTertiary;
+                e.currentTarget.style.borderColor = c.border;
+              }}
+            >
+              <InfoIcon size={12} />
+              Debug
+            </button>
           )}
         </div>
+      )}
+
+      {/* Debug modal (portal to body) */}
+      {showDebug && msg.debugData && createPortal(
+        <DebugModal data={msg.debugData} c={c} onClose={() => setShowDebug(false)} />,
+        document.body,
       )}
     </div>
   );
@@ -661,19 +1249,20 @@ function LoginScreen({ c, dark, onToggleTheme, onLogin }: {
 // Chat Screen
 // =============================================================================
 
-function ChatScreen({ token, dark, c, onToggleTheme, onLogout }: {
+function ChatScreen({ token, dark, c, onToggleTheme }: {
   token: string;
   dark: boolean;
   c: ColorTokens;
   onToggleTheme: () => void;
-  onLogout: () => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [attachedFile, setAttachedFile] = useState<AttachedFile | null>(null);
   const conversationId = useRef(uuid());
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [headerHover, setHeaderHover] = useState<string | null>(null);
   const mdComponents = useMdComponents(c);
 
@@ -690,12 +1279,55 @@ function ChatScreen({ token, dark, c, onToggleTheme, onLogout }: {
     }
   }, [messages, loading]);
 
-  const sendMessage = useCallback(async (text: string) => {
-    if (!text.trim() || loading) return;
+  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > MAX_FILE_SIZE) {
+      alert("Arquivo excede o limite de 5MB.");
+      e.target.value = "";
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const base64 = dataUrl.split(",")[1] || "";
+      const mime = file.type || "application/octet-stream";
+      let inputType = "document";
+      if (mime.startsWith("image/")) inputType = "image";
+      setAttachedFile({ name: file.name, mime, base64, type: inputType });
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  }
 
-    const userMsg: Message = { id: uuid(), role: "user", content: text.trim() };
+  const sendMessage = useCallback(async (text: string) => {
+    if ((!text.trim() && !attachedFile) || loading) return;
+
+    const fileInfo = attachedFile ? { name: attachedFile.name, mime: attachedFile.mime } : undefined;
+    const userMsg: Message = {
+      id: uuid(),
+      role: "user",
+      content: text.trim(),
+      file: fileInfo,
+    };
     setMessages((prev) => [...prev, userMsg]);
+
+    // Build input items
+    const inputItems: { type: string; content: string; filename?: string; mime_type?: string }[] = [];
+    if (attachedFile) {
+      inputItems.push({
+        type: attachedFile.type,
+        content: attachedFile.base64,
+        filename: attachedFile.name,
+        mime_type: attachedFile.mime,
+      });
+    }
+    if (text.trim()) {
+      inputItems.push({ type: "text", content: text.trim() });
+    }
+
     setInput("");
+    setAttachedFile(null);
     setLoading(true);
 
     if (inputRef.current) {
@@ -703,14 +1335,14 @@ function ChatScreen({ token, dark, c, onToggleTheme, onLogout }: {
     }
 
     try {
-      const res = await fetch(`${API}/run`, {
+      const res = await fetch(`${API}/run_debug`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          input: [{ type: "text", content: text.trim() }],
+          input: inputItems,
           conversation_id: conversationId.current,
         }),
       });
@@ -723,12 +1355,19 @@ function ChatScreen({ token, dark, c, onToggleTheme, onLogout }: {
       const data = await res.json();
       const fo = data.final_output || {};
 
+      // Extract debug data (trajectory + metrics from run_debug)
+      const debugData: DebugData = {};
+      if (data.trajectory) debugData.trajectory = data.trajectory;
+      if (data.metrics) debugData.metrics = data.metrics;
+      if (data.prompt_debug) debugData.prompt_debug = data.prompt_debug;
+
       setMessages((prev) => [...prev, {
         id: uuid(),
         role: "agent",
         content: fo.message || "(sem resposta)",
         actions: fo.actions_taken,
         metrics: data.metrics,
+        debugData: Object.keys(debugData).length > 0 ? debugData : undefined,
       }]);
     } catch (err: unknown) {
       setMessages((prev) => [...prev, {
@@ -740,7 +1379,7 @@ function ChatScreen({ token, dark, c, onToggleTheme, onLogout }: {
       setLoading(false);
       inputRef.current?.focus();
     }
-  }, [loading, token]);
+  }, [loading, token, attachedFile]);
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -764,7 +1403,7 @@ function ChatScreen({ token, dark, c, onToggleTheme, onLogout }: {
   }
 
   const hasMessages = messages.length > 0;
-  const canSend = input.trim().length > 0 && !loading;
+  const canSend = (input.trim().length > 0 || !!attachedFile) && !loading;
 
   const headerBtn = (id: string): React.CSSProperties => ({
     width: 36,
@@ -843,15 +1482,6 @@ function ChatScreen({ token, dark, c, onToggleTheme, onLogout }: {
             >
               {dark ? <SunIcon size={16} /> : <MoonIcon size={16} />}
             </button>
-            <button
-              onClick={onLogout}
-              onMouseEnter={() => setHeaderHover("logout")}
-              onMouseLeave={() => setHeaderHover(null)}
-              style={headerBtn("logout")}
-              title="Sair"
-            >
-              <LogoutIcon size={16} />
-            </button>
           </div>
         </div>
       </div>
@@ -918,7 +1548,45 @@ function ChatScreen({ token, dark, c, onToggleTheme, onLogout }: {
         transition: "background 0.3s, border-color 0.3s",
       }}>
         <div style={{ maxWidth: 640, margin: "0 auto" }}>
+          {/* Attached file chip */}
+          {attachedFile && (
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "8px 12px",
+              marginBottom: 6,
+              borderRadius: 12,
+              background: dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)",
+              border: `1px solid ${c.border}`,
+              width: "fit-content",
+            }}>
+              {isImageFile(attachedFile.name) ? <ImageIcon size={14} /> : <FileIcon size={14} />}
+              <span style={{ fontSize: 13, color: c.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 260 }}>
+                {attachedFile.name}
+              </span>
+              <button
+                onClick={() => setAttachedFile(null)}
+                style={{
+                  width: 18, height: 18, borderRadius: "50%", border: "none",
+                  background: dark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.1)",
+                  marginLeft: 4, cursor: "pointer",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: c.textSecondary,
+                }}
+              >
+                <CloseIcon size={10} />
+              </button>
+            </div>
+          )}
           <div style={{ position: "relative" }}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*,.pdf,.doc,.docx,.txt,.json,.csv"
+              onChange={handleFileSelect}
+              style={{ display: "none" }}
+            />
             <textarea
               ref={inputRef}
               value={input}
@@ -949,6 +1617,7 @@ function ChatScreen({ token, dark, c, onToggleTheme, onLogout }: {
             />
             <button
               type="button"
+              onClick={() => fileInputRef.current?.click()}
               style={{
                 position: "absolute",
                 left: 10,
@@ -957,8 +1626,8 @@ function ChatScreen({ token, dark, c, onToggleTheme, onLogout }: {
                 height: 32,
                 borderRadius: "50%",
                 border: "none",
-                background: c.inputBg,
-                color: c.text,
+                background: attachedFile ? c.bgSubtle : "transparent",
+                color: attachedFile ? c.text : c.textTertiary,
                 cursor: "pointer",
                 transition: "all 0.15s",
                 display: "flex",
@@ -1014,8 +1683,12 @@ function ChatScreen({ token, dark, c, onToggleTheme, onLogout }: {
 // Root
 // =============================================================================
 
+const AUTH_USER = process.env.NEXT_PUBLIC_AUTH_USER || "admin";
+const AUTH_PASS = process.env.NEXT_PUBLIC_AUTH_PASS || "admin123";
+
 export default function Home() {
   const [token, setToken] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
   const { dark, toggle } = useTheme();
   const c = getColors(dark);
 
@@ -1024,9 +1697,60 @@ export default function Home() {
     document.documentElement.style.background = c.bg;
   }, [c.bg]);
 
-  if (!token) {
-    return <LoginScreen c={c} dark={dark} onToggleTheme={toggle} onLogin={setToken} />;
+  // Auto-login on mount
+  useEffect(() => {
+    if (token) return;
+    (async () => {
+      try {
+        const res = await fetch(
+          `${API}/auth/login?username=${encodeURIComponent(AUTH_USER)}&password=${encodeURIComponent(AUTH_PASS)}`,
+          { method: "POST" },
+        );
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || `Auth failed: ${res.status}`);
+        }
+        const data = await res.json();
+        setToken(data.access_token);
+      } catch (err: unknown) {
+        setAuthError(err instanceof Error ? err.message : "Falha na autenticação");
+      }
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (authError) {
+    return (
+      <div style={{
+        display: "flex",
+        minHeight: "100dvh",
+        alignItems: "center",
+        justifyContent: "center",
+        background: c.bg,
+        color: c.error,
+        fontSize: 14,
+        padding: 24,
+        textAlign: "center",
+      }}>
+        Erro de autenticação: {authError}
+      </div>
+    );
   }
 
-  return <ChatScreen token={token} dark={dark} c={c} onToggleTheme={toggle} onLogout={() => setToken(null)} />;
+  if (!token) {
+    return (
+      <div style={{
+        display: "flex",
+        minHeight: "100dvh",
+        alignItems: "center",
+        justifyContent: "center",
+        background: c.bg,
+        color: c.textSecondary,
+        fontSize: 14,
+      }}>
+        Conectando...
+      </div>
+    );
+  }
+
+  return <ChatScreen token={token} dark={dark} c={c} onToggleTheme={toggle} />;
 }

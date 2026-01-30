@@ -41,20 +41,12 @@ class Settings(BaseSettings):
     # ==========================================================================
     # Model provider: 'anthropic', 'openai', 'vertexai'
     MODEL_PROVIDER: str = 'anthropic'
-    DEFAULT_MODEL: str = 'claude-sonnet-4-20250514'
+    DEFAULT_MODEL: str = 'gpt-5-mini'
 
     MODELS_SUPPORTED: list[str] = [
-        # Anthropic Direct
-        'claude-sonnet-4-20250514',
-        'claude-3-5-sonnet-20241022',
-        'claude-opus-4-20250514',
-        # Vertex AI Claude
-        'claude-sonnet-4@20250514',
-        'claude-3-5-sonnet-v2@20241022',
         # OpenAI
-        'gpt-4o',
-        'gpt-4-turbo',
-        'gpt-4o-mini',
+        'gpt-5-mini',
+        'gpt-5-nano',
     ]
 
     # Anthropic API

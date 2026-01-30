@@ -60,8 +60,9 @@ from app.tools import (agendar_consulta, buscar_paciente,  # noqa: E402
                        calcular_orcamento, cancelar_consulta,
                        consultar_convenios, consultar_historico_paciente,
                        formatar_contexto_state, listar_servicos,
-                       salvar_dados_cliente, salvar_preferencias,
-                       ver_contexto_sessao, verificar_disponibilidade)
+                       obter_data_hora, salvar_dados_cliente,
+                       salvar_preferencias, ver_contexto_sessao,
+                       verificar_disponibilidade)
 
 logger = get_logger(__name__)
 
@@ -315,7 +316,7 @@ def extract_actions_from_response(response: RunOutput) -> list[ActionTaken]:
 class AgentRunResult:
     """Result from agent execution."""
 
-    response: RunOutput
+    response: RunOutput | None
     instructions: str
     session_state: dict[str, Any]
     latency_ms: float
@@ -332,8 +333,6 @@ async def execute_agent(
     debug: bool = False,
 ) -> AgentRunResult:
     """Execute agent and return unified result.
-
-    This is the core agent execution logic shared by /run and /run_debug.
 
     Args:
         request: The run request with input and configuration.
@@ -370,17 +369,6 @@ async def execute_agent(
     )
 
     try:
-        # Get agent instructions
-        t0 = time.perf_counter()
-        instructions = await get_agent_instructions()
-        t1 = time.perf_counter()
-        logger.info(f'[PERF] get_instructions: {(t1-t0)*1000:.0f}ms', extra={'request_id': ''})
-
-        # Get session state from Redis
-        session_state = await get_session_state(conversation_id)
-        t2 = time.perf_counter()
-        logger.info(f'[PERF] get_session_state: {(t2-t1)*1000:.0f}ms', extra={'request_id': ''})
-
         # Parse multimodal input
         text_message, images, audios, videos, files = parse_multimodal_input(
             request.input
@@ -394,24 +382,28 @@ async def execute_agent(
             input_length=len(text_message),
         )
 
-        # Inject session state context into instructions
-        # This ensures the agent remembers client data and preferences
-        # even after history rolls off (NUM_HISTORY_RUNS limit)
+        # Get session state from Redis
+        session_state = await get_session_state(conversation_id)
+
+        t0 = time.perf_counter()
+        instructions = await get_agent_instructions()
+        t1 = time.perf_counter()
+        logger.info(
+            f'[PERF] get_instructions: {(t1-t0)*1000:.0f}ms',
+            extra={'request_id': ''},
+        )
+
         state_context = formatar_contexto_state(session_state)
         if state_context:
             instructions = instructions + state_context
 
-        # Create agent
         agent = create_agent(
             model_id=request.model,
             session_id=conversation_id,
             user_id=conversation_id,
             instructions=instructions,
         )
-        t3 = time.perf_counter()
-        logger.info(f'[PERF] create_agent: {(t3-t2)*1000:.0f}ms', extra={'request_id': ''})
 
-        # Build run kwargs
         run_kwargs: dict[str, Any] = {}
         if images:
             run_kwargs['images'] = images
@@ -422,10 +414,7 @@ async def execute_agent(
         if files:
             run_kwargs['files'] = files
 
-        # Run the agent
         response = await agent.arun(text_message, **run_kwargs)
-        t4 = time.perf_counter()
-        logger.info(f'[PERF] agent.arun: {(t4-t3)*1000:.0f}ms', extra={'request_id': ''})
 
         # Store messages in Redis
         await add_message_to_history(conversation_id, 'user', text_message)
@@ -435,15 +424,20 @@ async def execute_agent(
 
         # Update session state
         if hasattr(response, 'session_state') and response.session_state:
-            await update_session_state(conversation_id, response.session_state)
+            await update_session_state(
+                conversation_id, response.session_state
+            )
             session_state = response.session_state
 
         # Extract token info
         if hasattr(response, 'metrics') and response.metrics:
-            input_tokens = getattr(response.metrics, 'input_tokens', 0) or 0
-            output_tokens = getattr(response.metrics, 'output_tokens', 0) or 0
+            input_tokens = (
+                getattr(response.metrics, 'input_tokens', 0) or 0
+            )
+            output_tokens = (
+                getattr(response.metrics, 'output_tokens', 0) or 0
+            )
 
-        # Extract actions
         actions = extract_actions_from_response(response)
 
         latency_ms = (time.perf_counter() - start_time) * 1000
@@ -476,7 +470,7 @@ async def execute_agent(
     latency_ms = (time.perf_counter() - start_time) * 1000
 
     return AgentRunResult(
-        response=response,  # type: ignore
+        response=response,
         instructions=instructions,
         session_state=session_state,
         latency_ms=latency_ms,
@@ -507,6 +501,7 @@ _TOOLS_REGISTRY = {
     'salvar_dados_cliente': salvar_dados_cliente,
     'salvar_preferencias': salvar_preferencias,
     'ver_contexto_sessao': ver_contexto_sessao,
+    'obter_data_hora': obter_data_hora,
 }
 
 
@@ -572,6 +567,25 @@ async def get_metadata() -> MetadataResponse:
     Declares the module's capabilities, pipeline structure,
     exposed tools, and supported input types.
     """
+    pipeline = Pipeline(
+        is_monolithic=True,
+        stages=[
+            PipelineStage(
+                id='main', type='agent', model_configurable=True
+            )
+        ],
+    )
+    dynamic_prompts = DynamicPrompts(
+        state_key='mode',
+        mapping=[
+            DynamicPromptMapping(
+                state_value='default',
+                base_system_prompt=settings.AGENT_INSTRUCTIONS_FALLBACK,
+                expected_context_keys=['user_profile'],
+            ),
+        ],
+    )
+
     return MetadataResponse(
         module_id=settings.MODULE_ID,
         version=settings.MODULE_VERSION,
@@ -582,26 +596,8 @@ async def get_metadata() -> MetadataResponse:
             supports_cross_model=True,
             supports_jailbreak_tests=True,
         ),
-        pipeline=Pipeline(
-            is_monolithic=True,
-            stages=[
-                PipelineStage(
-                    id='main',
-                    type='agent',
-                    model_configurable=True,
-                )
-            ],
-        ),
-        dynamic_prompts=DynamicPrompts(
-            state_key='mode',
-            mapping=[
-                DynamicPromptMapping(
-                    state_value='default',
-                    base_system_prompt=settings.AGENT_INSTRUCTIONS_FALLBACK,
-                    expected_context_keys=['user_profile'],
-                ),
-            ],
-        ),
+        pipeline=pipeline,
+        dynamic_prompts=dynamic_prompts,
         tools_exposed=_get_tools_metadata(),
         input_types=InputTypes(
             supported_types=['text', 'image', 'audio', 'video', 'document'],
@@ -648,6 +644,8 @@ async def run(request: RunRequest) -> RunResponse:
         else None
     )
 
+    message = result.response.content or '' if result.response else ''
+
     logger.info(
         f'Agent run completed for {request.conversation_id} '
         f'in {result.latency_ms:.2f}ms'
@@ -656,7 +654,7 @@ async def run(request: RunRequest) -> RunResponse:
     return RunResponse(
         conversation_id=request.conversation_id,
         final_output=FinalOutput(
-            message=result.response.content or '',
+            message=message,
             state=result.session_state if result.session_state else None,
             actions_taken=result.actions if result.actions else None,
         ),
@@ -690,7 +688,7 @@ async def run_debug(request: RunRequest) -> RunDebugResponse:
             ),
             trajectory=[
                 TrajectoryStage(
-                    stage_id='main',
+                    stage_id='error',
                     type='agent',
                     sequence=1,
                     prompt_debug=PromptDebug(
@@ -708,6 +706,9 @@ async def run_debug(request: RunRequest) -> RunDebugResponse:
             ),
         )
 
+    message = result.response.content or '' if result.response else ''
+
+    # Build trajectory
     trajectory = [
         TrajectoryStage(
             stage_id='main',
@@ -726,6 +727,7 @@ async def run_debug(request: RunRequest) -> RunDebugResponse:
             latency_ms=result.latency_ms,
         )
     ]
+    llm_calls_count = 1
 
     logger.info(
         f'Agent debug run completed for {request.conversation_id} '
@@ -735,7 +737,7 @@ async def run_debug(request: RunRequest) -> RunDebugResponse:
     return RunDebugResponse(
         conversation_id=request.conversation_id,
         final_output=FinalOutput(
-            message=result.response.content or '',
+            message=message,
             state=result.session_state if result.session_state else None,
             actions_taken=result.actions if result.actions else None,
         ),
@@ -746,7 +748,7 @@ async def run_debug(request: RunRequest) -> RunDebugResponse:
                 'input': result.input_tokens,
                 'output': result.output_tokens,
             },
-            llm_calls=1,
+            llm_calls=llm_calls_count,
         ),
     )
 

@@ -16,6 +16,7 @@ from app.tools.consultar_convenios import consultar_convenios
 from app.tools.consultar_historico import consultar_historico_paciente
 from app.tools.formatar_contexto import formatar_contexto_state
 from app.tools.listar_servicos import listar_servicos
+from app.tools.obter_data_hora import obter_data_hora
 from app.tools.salvar_dados_cliente import salvar_dados_cliente
 from app.tools.salvar_preferencias import salvar_preferencias
 from app.tools.ver_contexto_sessao import ver_contexto_sessao
@@ -36,4 +37,5 @@ __all__ = [
     "ver_contexto_sessao",
     "verificar_cliente",
     "formatar_contexto_state",
+    "obter_data_hora",
 ]
