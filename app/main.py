@@ -15,6 +15,8 @@ import hashlib
 import hmac
 import inspect
 import json
+import subprocess
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -27,7 +29,7 @@ from agno.agent import RunOutput
 from agno.media import Audio, File, Image, Video
 from agno.os import AgentOS
 from agno.os.middleware.jwt import JWTMiddleware
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -50,10 +52,11 @@ from app.models import (ActionTaken, Capabilities, DynamicPromptMapping,
                         LLMCall, MetadataResponse, Metrics, Pipeline,
                         PipelineStage, PromptDebug, RunDebugResponse,
                         RunRequest, RunResponse, ToolExposed, TrajectoryStage)
-from app.prompt_manager import get_agent_instructions  # noqa: E402
-from app.prompt_manager import get_prompt_manager
+from app.prompt_manager import compile_prompt  # noqa: E402
+from app.prompt_manager import get_agent_instructions, get_prompt_manager
 from app.storage import close_redis  # noqa: E402
-from app.storage import (add_message_to_history, get_postgres_db, get_redis,
+from app.storage import (add_message_to_history, clear_message_history,
+                         delete_session_state, get_postgres_db, get_redis,
                          get_session_state, update_session_state)
 from app.tools import __all__ as tool_names  # noqa: E402
 from app.tools import (agendar_consulta, buscar_paciente,  # noqa: E402
@@ -255,6 +258,57 @@ custom_app = FastAPI(
 # =============================================================================
 
 
+def extract_response_text(response: RunOutput) -> str:
+    """Extract text from RunOutput, checking content and messages."""
+    if response.content:
+        return str(response.content)
+    # Fallback: check messages for last assistant message
+    if response.messages:
+        for msg in reversed(response.messages):
+            role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+            content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+            if role == 'assistant' and content:
+                return str(content)
+    # Last resort: get_content_as_string
+    try:
+        s = response.get_content_as_string()
+        if s and s != 'null' and s != 'None':
+            return s
+    except Exception:
+        pass
+    return ''
+
+
+def transcribe_audio(audio_bytes: bytes, mime_type: str | None = None) -> str:
+    """Transcribe audio to text using OpenAI Whisper API."""
+    import httpx
+
+    ext = '.mp3'
+    if mime_type:
+        ext_map = {'audio/ogg': '.ogg', 'audio/mpeg': '.mp3', 'audio/wav': '.wav'}
+        ext = ext_map.get(mime_type, '.mp3')
+
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=True) as f:
+        f.write(audio_bytes)
+        f.flush()
+        with open(f.name, 'rb') as audio_file:
+            resp = httpx.post(
+                'https://api.openai.com/v1/audio/transcriptions',
+                headers={'Authorization': f'Bearer {settings.OPENAI_API_KEY}'},
+                files={'file': (f'audio{ext}', audio_file)},
+                data={'model': 'gpt-4o-mini-transcribe', 'language': 'pt'},
+                timeout=30.0,
+            )
+            if resp.status_code == 200:
+                return resp.json().get('text', '')
+            logger.error(
+                'Whisper transcription failed: status=%s body=%s',
+                resp.status_code,
+                resp.text[:300],
+            )
+            return '[audio não transcrito]'
+
+
 def parse_multimodal_input(
     items: list[InputItem],
 ) -> tuple[str, list[Image], list[Audio], list[Video], list[File]]:
@@ -273,10 +327,10 @@ def parse_multimodal_input(
             images.append(Image(content=content_bytes))
         elif item.type == 'audio':
             content_bytes = base64.b64decode(item.content)
-            audio_format = 'wav'
-            if item.mime_type:
-                audio_format = item.mime_type.split('/')[-1]
-            audios.append(Audio(content=content_bytes, format=audio_format))
+            # Transcribe audio to text (most models don't support native audio input)
+            transcription = transcribe_audio(content_bytes, item.mime_type)
+            if transcription:
+                text_parts.append(f'[Audio do usuário]: {transcription}')
         elif item.type == 'video':
             content_bytes = base64.b64decode(item.content)
             videos.append(Video(content=content_bytes))
@@ -386,7 +440,7 @@ async def execute_agent(
         session_state = await get_session_state(conversation_id)
 
         t0 = time.perf_counter()
-        instructions = await get_agent_instructions()
+        template = await get_agent_instructions()
         t1 = time.perf_counter()
         logger.info(
             f'[PERF] get_instructions: {(t1-t0)*1000:.0f}ms',
@@ -394,8 +448,11 @@ async def execute_agent(
         )
 
         state_context = formatar_contexto_state(session_state)
-        if state_context:
-            instructions = instructions + state_context
+
+        instructions = compile_prompt(
+            template,
+            session_context=state_context,
+        )
 
         agent = create_agent(
             model_id=request.model,
@@ -417,9 +474,10 @@ async def execute_agent(
         response = await agent.arun(text_message, **run_kwargs)
 
         # Store messages in Redis
+        response_text = extract_response_text(response)
         await add_message_to_history(conversation_id, 'user', text_message)
         await add_message_to_history(
-            conversation_id, 'assistant', response.content or ''
+            conversation_id, 'assistant', response_text
         )
 
         # Update session state
@@ -644,7 +702,15 @@ async def run(request: RunRequest) -> RunResponse:
         else None
     )
 
-    message = result.response.content or '' if result.response else ''
+    message = extract_response_text(result.response) if result.response else ''
+
+    if not message:
+        logger.warning(
+            'Agent response empty for %s - content=%s, messages_count=%s',
+            request.conversation_id,
+            repr(result.response.content)[:100] if result.response else 'N/A',
+            len(result.response.messages) if result.response and result.response.messages else 0,
+        )
 
     logger.info(
         f'Agent run completed for {request.conversation_id} '
@@ -706,7 +772,7 @@ async def run_debug(request: RunRequest) -> RunDebugResponse:
             ),
         )
 
-    message = result.response.content or '' if result.response else ''
+    message = extract_response_text(result.response) if result.response else ''
 
     # Build trajectory
     trajectory = [

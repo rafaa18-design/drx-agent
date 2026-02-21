@@ -45,6 +45,7 @@ RUN groupadd --gid 1000 appgroup && \
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

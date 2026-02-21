@@ -8,6 +8,7 @@ Manages agent prompts with the following strategy:
 """
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -239,3 +240,23 @@ def get_agent_instructions_sync() -> str:
     """Synchronous version for non-async contexts."""
     manager = get_prompt_manager()
     return manager.get_prompt_sync()
+
+
+def compile_prompt(template: str, **variables: str) -> str:
+    """Compile a prompt template by replacing {{variable}} placeholders.
+
+    Follows the same convention as Langfuse text prompts.
+    Variables not provided are replaced with empty string.
+
+    Args:
+        template: Prompt template with {{variable}} placeholders.
+        **variables: Key-value pairs to substitute.
+
+    Returns:
+        Compiled prompt string.
+    """
+    def replacer(match: re.Match) -> str:
+        key = match.group(1).strip()
+        return variables.get(key, '')
+
+    return re.sub(r'\{\{(\s*\w+\s*)\}\}', replacer, template)

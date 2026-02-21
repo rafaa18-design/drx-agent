@@ -38,6 +38,9 @@ class RunRequest(BaseModel):
     input: list[InputItem] = Field(..., min_length=1)
     conversation_id: str = Field(..., min_length=1)
     model: str | None = Field(None, description='Optional model override')
+    received_at: float | None = Field(
+        None, description='Unix timestamp when the message was received by the connector'
+    )
 
 
 # =============================================================================
