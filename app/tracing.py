@@ -14,8 +14,7 @@ import logging
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import (BatchSpanProcessor,
-                                            SimpleSpanProcessor)
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from app.config import settings
 
@@ -67,15 +66,19 @@ def setup_tracing(app=None):
                 endpoint=f'{settings.LANGFUSE_BASE_URL}/api/public/otel/v1/traces',
                 headers={'Authorization': f'Basic {langfuse_auth}'},
             )
-            provider.add_span_processor(SimpleSpanProcessor(langfuse_exporter))
+            provider.add_span_processor(BatchSpanProcessor(langfuse_exporter))
             logger.info('Langfuse OTEL exporter configured: %s', settings.LANGFUSE_BASE_URL)
 
+        # Set provider globally BEFORE instrumenting libraries
         trace.set_tracer_provider(provider)
 
         if has_langfuse:
-            from openinference.instrumentation.agno import AgnoInstrumentor
-            AgnoInstrumentor().instrument(tracer_provider=provider)
-            logger.info('Agno instrumented with OpenInference → Langfuse')
+            try:
+                from openinference.instrumentation.agno import AgnoInstrumentor
+                AgnoInstrumentor().instrument(tracer_provider=provider)
+                logger.info('Agno instrumented with OpenInference -> Langfuse')
+            except Exception as e:
+                logger.warning('AgnoInstrumentor not available: %s', e)
 
         if app is not None and has_otel:
             from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
