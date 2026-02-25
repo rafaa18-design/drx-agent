@@ -396,7 +396,6 @@ async def execute_agent(
     """
     from app.audit import (audit_agent_run_failure, audit_agent_run_start,
                            audit_agent_run_success)
-    from app.tracing import create_span
 
     start_time = time.perf_counter()
     conversation_id = request.conversation_id
@@ -410,121 +409,105 @@ async def execute_agent(
     output_tokens = 0
     actions: list[ActionTaken] = []
 
-    # Langfuse OTEL span attributes for trace metadata
-    langfuse_attrs = {
-        'user.id': conversation_id,
-        'session.id': conversation_id,
-        'langfuse.trace.name': 'agent-run',
-        'langfuse.trace.tags': json.dumps(
-            ['debug' if debug else 'production', 'agentbench']
-        ),
-        'langfuse.trace.metadata': json.dumps({
-            'model': model,
-            'module_id': settings.MODULE_ID,
-            'debug': debug,
-        }),
-    }
+    try:
+        # Parse multimodal input
+        text_message, images, audios, videos, files = parse_multimodal_input(
+            request.input
+        )
 
-    with create_span('agent-run', langfuse_attrs):
-        try:
-            # Parse multimodal input
-            text_message, images, audios, videos, files = parse_multimodal_input(
-                request.input
+        # Audit log run start
+        audit_agent_run_start(
+            user_id=conversation_id,
+            session_id=conversation_id,
+            model=model,
+            input_length=len(text_message),
+        )
+
+        # Get session state from Redis
+        session_state = await get_session_state(conversation_id)
+
+        t0 = time.perf_counter()
+        template = await get_agent_instructions()
+        t1 = time.perf_counter()
+        logger.info(
+            f'[PERF] get_instructions: {(t1-t0)*1000:.0f}ms',
+            extra={'request_id': ''},
+        )
+
+        state_context = formatar_contexto_state(session_state)
+
+        instructions = compile_prompt(
+            template,
+            session_context=state_context,
+        )
+
+        agent = create_agent(
+            model_id=request.model,
+            session_id=conversation_id,
+            user_id=conversation_id,
+            instructions=instructions,
+        )
+
+        run_kwargs: dict[str, Any] = {}
+        if images:
+            run_kwargs['images'] = images
+        if audios:
+            run_kwargs['audio'] = audios
+        if videos:
+            run_kwargs['videos'] = videos
+        if files:
+            run_kwargs['files'] = files
+
+        response = await agent.arun(text_message, **run_kwargs)
+
+        # Store messages in Redis
+        response_text = extract_response_text(response)
+        await add_message_to_history(conversation_id, 'user', text_message)
+        await add_message_to_history(
+            conversation_id, 'assistant', response_text
+        )
+
+        # Update session state
+        if hasattr(response, 'session_state') and response.session_state:
+            await update_session_state(
+                conversation_id, response.session_state
+            )
+            session_state = response.session_state
+
+        # Extract token info
+        if hasattr(response, 'metrics') and response.metrics:
+            input_tokens = (
+                getattr(response.metrics, 'input_tokens', 0) or 0
+            )
+            output_tokens = (
+                getattr(response.metrics, 'output_tokens', 0) or 0
             )
 
-            # Audit log run start
-            audit_agent_run_start(
-                user_id=conversation_id,
-                session_id=conversation_id,
-                model=model,
-                input_length=len(text_message),
-            )
+        actions = extract_actions_from_response(response)
 
-            # Get session state from Redis
-            session_state = await get_session_state(conversation_id)
+        latency_ms = (time.perf_counter() - start_time) * 1000
 
-            t0 = time.perf_counter()
-            template = await get_agent_instructions()
-            t1 = time.perf_counter()
-            logger.info(
-                f'[PERF] get_instructions: {(t1-t0)*1000:.0f}ms',
-                extra={'request_id': ''},
-            )
+        # Audit log success
+        audit_agent_run_success(
+            user_id=conversation_id,
+            session_id=conversation_id,
+            model=model,
+            duration_ms=latency_ms,
+            tokens_used=input_tokens + output_tokens,
+            tool_calls=len(actions),
+        )
 
-            state_context = formatar_contexto_state(session_state)
-
-            instructions = compile_prompt(
-                template,
-                session_context=state_context,
-            )
-
-            agent = create_agent(
-                model_id=request.model,
-                session_id=conversation_id,
-                user_id=conversation_id,
-                instructions=instructions,
-            )
-
-            run_kwargs: dict[str, Any] = {}
-            if images:
-                run_kwargs['images'] = images
-            if audios:
-                run_kwargs['audio'] = audios
-            if videos:
-                run_kwargs['videos'] = videos
-            if files:
-                run_kwargs['files'] = files
-
-            response = await agent.arun(text_message, **run_kwargs)
-
-            # Store messages in Redis
-            response_text = extract_response_text(response)
-            await add_message_to_history(conversation_id, 'user', text_message)
-            await add_message_to_history(
-                conversation_id, 'assistant', response_text
-            )
-
-            # Update session state
-            if hasattr(response, 'session_state') and response.session_state:
-                await update_session_state(
-                    conversation_id, response.session_state
-                )
-                session_state = response.session_state
-
-            # Extract token info
-            if hasattr(response, 'metrics') and response.metrics:
-                input_tokens = (
-                    getattr(response.metrics, 'input_tokens', 0) or 0
-                )
-                output_tokens = (
-                    getattr(response.metrics, 'output_tokens', 0) or 0
-                )
-
-            actions = extract_actions_from_response(response)
-
-            latency_ms = (time.perf_counter() - start_time) * 1000
-
-            # Audit log success
-            audit_agent_run_success(
-                user_id=conversation_id,
-                session_id=conversation_id,
-                model=model,
-                duration_ms=latency_ms,
-                tokens_used=input_tokens + output_tokens,
-                tool_calls=len(actions),
-            )
-
-        except Exception as e:
-            error = e
-            logger.error(f'Agent run failed for {conversation_id}: {e}')
-            latency_ms = (time.perf_counter() - start_time) * 1000
-            audit_agent_run_failure(
-                user_id=conversation_id,
-                session_id=conversation_id,
-                model=model,
-                error=str(e),
-                duration_ms=latency_ms,
-            )
+    except Exception as e:
+        error = e
+        logger.error(f'Agent run failed for {conversation_id}: {e}')
+        latency_ms = (time.perf_counter() - start_time) * 1000
+        audit_agent_run_failure(
+            user_id=conversation_id,
+            session_id=conversation_id,
+            model=model,
+            error=str(e),
+            duration_ms=latency_ms,
+        )
 
     latency_ms = (time.perf_counter() - start_time) * 1000
 
