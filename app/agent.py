@@ -295,8 +295,55 @@ async def run_agent_loop(
                 max_tokens=max_tokens,
             )
         except Exception as e:
-            logger.error(f'litellm.acompletion failed (iteration {iteration}): {e}')
-            raise
+            error_str = str(e)
+            is_retriable = '503' in error_str or '429' in error_str or 'ServiceUnavailable' in error_str or 'RateLimitError' in error_str
+            if not is_retriable:
+                logger.error(f'litellm.acompletion failed (iteration {iteration}): {e}')
+                raise
+
+            # Retry once on the same model before falling back
+            logger.warning(f'Primary model {model} failed ({e}), retrying in 2s...')
+            await asyncio.sleep(2)
+            try:
+                response = await litellm.acompletion(
+                    model=model,
+                    messages=call_messages,
+                    tools=call_tools,
+                    tool_choice='auto' if call_tools else None,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                logger.info(f'Retry on primary model {model} succeeded')
+            except Exception:
+                # Try fallback models
+                if not settings.FALLBACK_MODELS:
+                    logger.error(f'Retry failed and no fallback models configured. Original error: {e}')
+                    raise
+                response = None
+                for fb_model_id in settings.FALLBACK_MODELS:
+                    fb_model = get_litellm_model(fb_model_id)
+                    logger.warning(f'Primary model retry failed, trying fallback: {fb_model}')
+                    try:
+                        fb_messages = call_messages
+                        fb_tools = call_tools
+                        if _supports_prompt_caching(fb_model) and settings.CACHE_SYSTEM_PROMPT and fb_tools:
+                            fb_messages, fb_tools = _apply_cache_control(messages, fb_tools)
+                        response = await litellm.acompletion(
+                            model=fb_model,
+                            messages=fb_messages,
+                            tools=fb_tools,
+                            tool_choice='auto' if fb_tools else None,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                        )
+                        logger.info(f'Fallback model {fb_model} succeeded')
+                        break
+                    except Exception as fb_err:
+                        logger.warning(f'Fallback model {fb_model} also failed: {fb_err}')
+                        continue
+                if response is None:
+                    logger.error(f'All models (primary + fallbacks) failed. Original error: {e}')
+                    raise
 
         # Track token usage
         usage = getattr(response, 'usage', None)
