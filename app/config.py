@@ -43,8 +43,6 @@ class Settings(BaseSettings):
     MODEL_PROVIDER: str = 'anthropic'
     DEFAULT_MODEL: str = 'gpt-5-mini'
 
-    FALLBACK_MODELS: list[str] = []  # Fallback models if primary is unavailable (503/429)
-
     MODELS_SUPPORTED: list[str] = [
         # OpenAI
         'gpt-5-mini',

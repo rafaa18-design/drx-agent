@@ -253,6 +253,12 @@ async def execute_agent(
             model=model,
             max_iterations=settings.MAX_TURNS,
             max_tokens=settings.MAX_OUTPUT_TOKENS,
+            langfuse_metadata={
+                'session_id': conversation_id,
+                'trace_user_id': conversation_id,
+                'trace_name': f'{settings.MODULE_NAME}-run',
+                'tags': [settings.MODULE_NAME, model_id],
+            },
         )
 
         # Store messages in Redis

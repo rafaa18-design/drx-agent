@@ -263,6 +263,28 @@ def get_langfuse() -> Langfuse | None:
     return _langfuse
 
 
+def setup_langfuse_callback():
+    """Configure litellm to send traces to Langfuse via success/failure callbacks.
+
+    This enables automatic trace creation with session_id, user_id, etc.
+    when metadata is passed to litellm.acompletion() calls.
+    """
+    if not settings.LANGFUSE_ENABLED:
+        return
+
+    if not settings.LANGFUSE_PUBLIC_KEY or not settings.LANGFUSE_SECRET_KEY:
+        return
+
+    import litellm
+
+    if 'langfuse' not in litellm.success_callback:
+        litellm.success_callback.append('langfuse')
+    if 'langfuse' not in litellm.failure_callback:
+        litellm.failure_callback.append('langfuse')
+
+    logger.info('Langfuse callback configured for litellm traces')
+
+
 def shutdown_langfuse():
     """Shutdown the Langfuse client gracefully."""
     global _langfuse

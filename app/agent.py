@@ -60,11 +60,18 @@ def get_litellm_model(model_id: str | None = None) -> str:
     """Return a litellm model string for the given model ID.
 
     Supports:
+    - Already-prefixed models (provider/model)
     - Anthropic Claude (anthropic/...)
     - OpenAI GPT (openai/...)
     - Vertex AI Claude (vertex_ai/...)
+    - Gemini models (gemini/...)
+    - Unknown model IDs fall back to DEFAULT_MODEL
     """
     model_id = model_id or settings.DEFAULT_MODEL
+
+    # Already has provider prefix (e.g., gemini/gemini-3-flash-preview)
+    if '/' in model_id:
+        return model_id
 
     # Vertex AI Claude (model IDs contain @ symbol)
     if '@' in model_id or settings.MODEL_PROVIDER == 'vertexai':
@@ -78,8 +85,21 @@ def get_litellm_model(model_id: str | None = None) -> str:
     if 'gpt' in model_id.lower() or 'o1' in model_id.lower():
         return f'openai/{model_id}'
 
-    # Default: pass as-is (litellm handles many providers)
-    return model_id
+    # Gemini models
+    if 'gemini' in model_id.lower():
+        return f'gemini/{model_id}'
+
+    # Unknown model ID (e.g. "agentbench") — fall back to DEFAULT_MODEL
+    if model_id != settings.DEFAULT_MODEL:
+        logger.warning(
+            'Unknown model "%s", falling back to %s',
+            model_id,
+            settings.DEFAULT_MODEL,
+        )
+        return get_litellm_model(settings.DEFAULT_MODEL)
+
+    # Last resort: use provider prefix from settings
+    return f'{settings.MODEL_PROVIDER}/{model_id}'
 
 
 def _supports_prompt_caching(model: str) -> bool:
@@ -243,6 +263,7 @@ async def run_agent_loop(
     max_iterations: int = 10,
     temperature: float = 0.1,
     max_tokens: int = 2048,
+    langfuse_metadata: dict[str, Any] | None = None,
 ) -> AgentResponse:
     """Run the agent loop with litellm.
 
@@ -251,6 +272,7 @@ async def run_agent_loop(
     - Duplicate tool call detection (returns cached result instantly)
     - Per-tool call limit (max 3 calls to same tool per turn)
     - Parallel tool execution (asyncio.gather for independent tools)
+    - Langfuse tracing (session_id, user_id, trace_name via metadata)
 
     Args:
         messages: Initial messages (system + user).
@@ -260,10 +282,14 @@ async def run_agent_loop(
         max_iterations: Maximum tool-calling iterations.
         temperature: LLM temperature.
         max_tokens: Max output tokens per LLM call.
+        langfuse_metadata: Optional Langfuse metadata (session_id, trace_user_id, etc.).
 
     Returns:
         AgentResponse with the final content and execution metadata.
     """
+    # Build metadata for Langfuse tracing
+    metadata = langfuse_metadata or {}
+
     total_input_tokens = 0
     total_output_tokens = 0
     tools_used: list[str] = []
@@ -286,6 +312,12 @@ async def run_agent_loop(
             )
 
         try:
+            # Add iteration info to metadata for Langfuse
+            call_metadata = {
+                **metadata,
+                'generation_name': f'iteration-{iteration}',
+            }
+
             response = await litellm.acompletion(
                 model=model,
                 messages=call_messages,
@@ -293,57 +325,11 @@ async def run_agent_loop(
                 tool_choice='auto' if call_tools else None,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                metadata=call_metadata,
             )
         except Exception as e:
-            error_str = str(e)
-            is_retriable = '503' in error_str or '429' in error_str or 'ServiceUnavailable' in error_str or 'RateLimitError' in error_str
-            if not is_retriable:
-                logger.error(f'litellm.acompletion failed (iteration {iteration}): {e}')
-                raise
-
-            # Retry once on the same model before falling back
-            logger.warning(f'Primary model {model} failed ({e}), retrying in 2s...')
-            await asyncio.sleep(2)
-            try:
-                response = await litellm.acompletion(
-                    model=model,
-                    messages=call_messages,
-                    tools=call_tools,
-                    tool_choice='auto' if call_tools else None,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
-                logger.info(f'Retry on primary model {model} succeeded')
-            except Exception:
-                # Try fallback models
-                if not settings.FALLBACK_MODELS:
-                    logger.error(f'Retry failed and no fallback models configured. Original error: {e}')
-                    raise
-                response = None
-                for fb_model_id in settings.FALLBACK_MODELS:
-                    fb_model = get_litellm_model(fb_model_id)
-                    logger.warning(f'Primary model retry failed, trying fallback: {fb_model}')
-                    try:
-                        fb_messages = call_messages
-                        fb_tools = call_tools
-                        if _supports_prompt_caching(fb_model) and settings.CACHE_SYSTEM_PROMPT and fb_tools:
-                            fb_messages, fb_tools = _apply_cache_control(messages, fb_tools)
-                        response = await litellm.acompletion(
-                            model=fb_model,
-                            messages=fb_messages,
-                            tools=fb_tools,
-                            tool_choice='auto' if fb_tools else None,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                        )
-                        logger.info(f'Fallback model {fb_model} succeeded')
-                        break
-                    except Exception as fb_err:
-                        logger.warning(f'Fallback model {fb_model} also failed: {fb_err}')
-                        continue
-                if response is None:
-                    logger.error(f'All models (primary + fallbacks) failed. Original error: {e}')
-                    raise
+            logger.error(f'litellm.acompletion failed (iteration {iteration}): {e}')
+            raise
 
         # Track token usage
         usage = getattr(response, 'usage', None)
