@@ -264,10 +264,10 @@ def get_langfuse() -> Langfuse | None:
 
 
 def setup_langfuse_callback():
-    """Configure litellm to send traces to Langfuse via success/failure callbacks.
+    """Configure litellm to send traces to Langfuse via OTEL-based callback.
 
-    This enables automatic trace creation with session_id, user_id, etc.
-    when metadata is passed to litellm.acompletion() calls.
+    Uses 'langfuse_otel' instead of legacy 'langfuse' callback,
+    which is required for langfuse SDK v3+.
     """
     if not settings.LANGFUSE_ENABLED:
         return
@@ -277,12 +277,12 @@ def setup_langfuse_callback():
 
     import litellm
 
-    if 'langfuse' not in litellm.success_callback:
-        litellm.success_callback.append('langfuse')
-    if 'langfuse' not in litellm.failure_callback:
-        litellm.failure_callback.append('langfuse')
+    if 'langfuse_otel' not in litellm.success_callback:
+        litellm.success_callback.append('langfuse_otel')
+    if 'langfuse_otel' not in litellm.failure_callback:
+        litellm.failure_callback.append('langfuse_otel')
 
-    logger.info('Langfuse callback configured for litellm traces')
+    logger.info('Langfuse OTEL callback configured for litellm traces')
 
 
 def shutdown_langfuse():
