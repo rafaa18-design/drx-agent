@@ -61,46 +61,87 @@ def extract_response_text(response: AgentResponse) -> str:
     return response.content or ''
 
 
+def _model_supports_audio(model: str) -> bool:
+    """Check if the model natively supports audio input."""
+    lower = model.lower()
+    # Gemini models support audio natively
+    if 'gemini' in lower:
+        return True
+    return False
+
+
 def transcribe_audio(audio_bytes: bytes, mime_type: str | None = None) -> str:
-    """Transcribe audio to text using OpenAI Whisper API."""
+    """Transcribe audio to text.
+
+    Tries Gemini API first (if GEMINI_API_KEY is set), falls back to OpenAI Whisper.
+    """
     import httpx
 
-    ext = '.mp3'
-    if mime_type:
-        ext_map = {'audio/ogg': '.ogg', 'audio/mpeg': '.mp3', 'audio/wav': '.wav'}
-        ext = ext_map.get(mime_type, '.mp3')
-
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=True) as f:
-        f.write(audio_bytes)
-        f.flush()
-        with open(f.name, 'rb') as audio_file:
+    # 1. Try Gemini API
+    if settings.GEMINI_API_KEY:
+        try:
+            b64_audio = base64.b64encode(audio_bytes).decode('utf-8')
             resp = httpx.post(
-                'https://api.openai.com/v1/audio/transcriptions',
-                headers={'Authorization': f'Bearer {settings.OPENAI_API_KEY}'},
-                files={'file': (f'audio{ext}', audio_file)},
-                data={'model': 'gpt-4o-mini-transcribe', 'language': 'pt'},
+                f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={settings.GEMINI_API_KEY}',
+                json={
+                    'contents': [{
+                        'parts': [
+                            {'text': 'Transcreva este áudio em português. Retorne APENAS o texto transcrito, sem explicações.'},
+                            {'inline_data': {'mime_type': mime_type or 'audio/mpeg', 'data': b64_audio}},
+                        ]
+                    }],
+                },
                 timeout=30.0,
             )
             if resp.status_code == 200:
-                return resp.json().get('text', '')
-            logger.error(
-                'Whisper transcription failed: status=%s body=%s',
-                resp.status_code,
-                resp.text[:300],
-            )
-            return '[audio não transcrito]'
+                data = resp.json()
+                text = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+                if text:
+                    return text.strip()
+            logger.error('Gemini transcription failed: status=%s body=%s', resp.status_code, resp.text[:300])
+        except Exception as e:
+            logger.error('Gemini transcription error: %s', str(e))
+
+    # 2. Fallback to OpenAI Whisper
+    if settings.OPENAI_API_KEY:
+        ext = '.mp3'
+        if mime_type:
+            ext_map = {'audio/ogg': '.ogg', 'audio/mpeg': '.mp3', 'audio/wav': '.wav'}
+            ext = ext_map.get(mime_type, '.mp3')
+
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=True) as f:
+            f.write(audio_bytes)
+            f.flush()
+            with open(f.name, 'rb') as audio_file:
+                resp = httpx.post(
+                    'https://api.openai.com/v1/audio/transcriptions',
+                    headers={'Authorization': f'Bearer {settings.OPENAI_API_KEY}'},
+                    files={'file': (f'audio{ext}', audio_file)},
+                    data={'model': 'gpt-4o-mini-transcribe', 'language': 'pt'},
+                    timeout=30.0,
+                )
+                if resp.status_code == 200:
+                    return resp.json().get('text', '')
+                logger.error('Whisper transcription failed: status=%s body=%s', resp.status_code, resp.text[:300])
+
+    return '[audio não transcrito]'
 
 
 def parse_multimodal_input(
     items: list[InputItem],
+    model: str = '',
 ) -> tuple[str, list[dict]]:
     """Parse multimodal input items into litellm content parts.
 
+    Args:
+        items: Input items from the request.
+        model: The litellm model string (used to check native audio support).
+
     Returns:
-        Tuple of (text_message, image_content_parts).
+        Tuple of (text_message, media_content_parts).
     """
     text_parts: list[str] = []
-    images: list[dict] = []
+    media: list[dict] = []
 
     for item in items:
         if item.type == 'text':
@@ -109,27 +150,34 @@ def parse_multimodal_input(
             content_bytes = base64.b64decode(item.content)
             b64_str = base64.b64encode(content_bytes).decode('utf-8')
             mime = item.mime_type or 'image/jpeg'
-            images.append({
+            media.append({
                 'type': 'image_url',
                 'image_url': {'url': f'data:{mime};base64,{b64_str}'},
             })
         elif item.type == 'audio':
             content_bytes = base64.b64decode(item.content)
-            # Transcribe audio to text (most models don't support native audio input)
-            transcription = transcribe_audio(content_bytes, item.mime_type)
-            if transcription:
-                text_parts.append(f'[Audio do usuário]: {transcription}')
+            if _model_supports_audio(model):
+                # Pass audio natively to the model
+                b64_str = base64.b64encode(content_bytes).decode('utf-8')
+                mime = item.mime_type or 'audio/mpeg'
+                media.append({
+                    'type': 'input_audio',
+                    'input_audio': {'data': b64_str, 'format': mime},
+                })
+            else:
+                # Transcribe audio to text
+                transcription = transcribe_audio(content_bytes, item.mime_type)
+                if transcription:
+                    text_parts.append(f'[Audio do usuário]: {transcription}')
         elif item.type == 'video':
-            # Video not natively supported by text LLMs, add as note
             text_parts.append('[Vídeo enviado pelo usuário - não suportado para análise direta]')
         elif item.type == 'document':
-            # Document not natively supported, add as note
             text_parts.append(
                 f'[Documento enviado: {item.filename or "documento"}]'
             )
 
     text_message = '\n'.join(text_parts) if text_parts else ''
-    return text_message, images
+    return text_message, media
 
 
 def extract_actions_from_response(response: AgentResponse) -> list[ActionTaken]:
@@ -192,7 +240,8 @@ async def execute_agent(
 
     try:
         # Parse multimodal input
-        text_message, images = parse_multimodal_input(request.input)
+        model = get_litellm_model(model_id)
+        text_message, images = parse_multimodal_input(request.input, model=model)
 
         # Audit log run start
         audit_agent_run_start(

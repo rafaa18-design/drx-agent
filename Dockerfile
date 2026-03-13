@@ -22,15 +22,13 @@ WORKDIR /app
 COPY pyproject.toml ./
 
 # Install dependencies (cached layer)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv lock && uv sync --no-install-project --no-dev
+RUN uv lock && uv sync --no-install-project --no-dev
 
 # Copy application code
 COPY app/ ./app/
 
 # Install the project
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev
+RUN uv sync --no-dev
 
 
 # -----------------------------------------------------------------------------

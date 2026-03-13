@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     # AgentOS Configuration
     # ==========================================================================
     MODULE_ID: str = 'clinica-odontologica'
+    MODULE_NAME: str = 'ai-agent'
     MODULE_VERSION: str = '1.0.0'
     MODULE_DESCRIPTION: str = 'Clínica Sorriso - Agente de Atendimento Odontológico'
 
@@ -54,6 +55,9 @@ class Settings(BaseSettings):
 
     # OpenAI API
     OPENAI_API_KEY: str = ''
+
+    # Google Gemini API (used for audio transcription when OpenAI is not available)
+    GEMINI_API_KEY: str = ''
 
     # Vertex AI (Google Cloud)
     GOOGLE_CLOUD_PROJECT: str = ''
