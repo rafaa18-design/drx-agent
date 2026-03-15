@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Scopes required to create tokens via /auth/token endpoint
     AUTH_ADMIN_SCOPES: list[str] = ['admin', 'tokens:create']
 
+    # Phone allowlist (empty = allow all; set to restrict agent to specific numbers)
+    PHONE_ALLOWLIST: list[str] = []
+
     # ==========================================================================
     # Model Configuration
     # ==========================================================================

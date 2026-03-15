@@ -52,6 +52,45 @@ logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Phone Allowlist
+# ---------------------------------------------------------------------------
+
+import re
+
+
+def _normalize_phone(raw: str) -> str:
+    """Extract the core phone digits from a conversation_id.
+
+    Handles formats like:
+      uazapi-5575998510965, 5575998510965, 75998510965, 998510965
+    Returns DDD(2) + number(8) = 10 digits (strips country code and 9th digit).
+    """
+    digits = re.sub(r'\D', '', raw)
+    # Strip country code 55 if present (Brazilian numbers)
+    if len(digits) >= 12 and digits.startswith('55'):
+        digits = digits[2:]
+    # Strip the 9th digit after DDD (mobile numbers: DDD + 9 + 8 digits = 11)
+    if len(digits) == 11 and digits[2] == '9':
+        digits = digits[:2] + digits[3:]
+    return digits
+
+
+def _is_phone_allowed(conversation_id: str) -> bool:
+    """Check if conversation_id matches the phone allowlist.
+
+    Returns True if allowlist is empty (no restriction) or if the
+    normalized phone matches any entry in the allowlist.
+    """
+    if not settings.PHONE_ALLOWLIST:
+        return True
+    normalized = _normalize_phone(conversation_id)
+    for allowed in settings.PHONE_ALLOWLIST:
+        if _normalize_phone(allowed) == normalized:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Helper Functions
 # ---------------------------------------------------------------------------
 
@@ -228,6 +267,22 @@ async def execute_agent(
 
     start_time = time.perf_counter()
     conversation_id = request.conversation_id
+
+    # Phone allowlist check (early return — no LLM cost)
+    if not _is_phone_allowed(conversation_id):
+        logger.info(f'Phone {conversation_id} not in allowlist, skipping')
+        return AgentRunResult(
+            response=None,
+            instructions='',
+            session_state={},
+            latency_ms=0,
+            input_tokens=0,
+            output_tokens=0,
+            text_message='',
+            actions=[],
+            error=None,
+        )
+
     model_id = request.model or settings.DEFAULT_MODEL
     error: Exception | None = None
     response: AgentResponse | None = None
