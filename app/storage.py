@@ -111,12 +111,12 @@ async def get_redis_pool_stats() -> dict[str, int] | None:
 
 def _session_key(conversation_id: str) -> str:
     """Generate key for session state."""
-    return f'session:{conversation_id}:state'
+    return f'{settings.AGENT_NAME}:session:{conversation_id}:state'
 
 
 def _history_key(conversation_id: str) -> str:
     """Generate key for message history."""
-    return f'session:{conversation_id}:history'
+    return f'{settings.AGENT_NAME}:session:{conversation_id}:history'
 
 
 # In-memory fallback for when Redis is unavailable
@@ -293,7 +293,7 @@ _cache_store: dict[str, Any] = {}
 
 async def cache_get(key: str) -> Any | None:
     """Get value from cache in Redis (with in-memory fallback)."""
-    cache_key = f'cache:{key}'
+    cache_key = f'{settings.AGENT_NAME}:cache:{key}'
 
     client = await get_redis()
 
@@ -312,7 +312,7 @@ async def cache_get(key: str) -> Any | None:
 
 async def cache_set(key: str, value: Any, ttl: int | None = None):
     """Set value in cache in Redis (with in-memory fallback)."""
-    cache_key = f'cache:{key}'
+    cache_key = f'{settings.AGENT_NAME}:cache:{key}'
 
     # Always store in memory
     _cache_store[cache_key] = value
@@ -334,7 +334,7 @@ async def cache_set(key: str, value: Any, ttl: int | None = None):
 
 async def cache_delete(key: str):
     """Delete value from cache in Redis and memory."""
-    cache_key = f'cache:{key}'
+    cache_key = f'{settings.AGENT_NAME}:cache:{key}'
 
     # Remove from memory
     _cache_store.pop(cache_key, None)
