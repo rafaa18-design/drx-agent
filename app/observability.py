@@ -268,6 +268,9 @@ def setup_langfuse_callback():
 
     Uses 'langfuse_otel' instead of legacy 'langfuse' callback,
     which is required for langfuse SDK v3+.
+
+    Also sets the environment variables that LiteLLM reads internally
+    (LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST).
     """
     if not settings.LANGFUSE_ENABLED:
         return
@@ -275,7 +278,14 @@ def setup_langfuse_callback():
     if not settings.LANGFUSE_PUBLIC_KEY or not settings.LANGFUSE_SECRET_KEY:
         return
 
+    import os
+
     import litellm
+
+    # LiteLLM reads these env vars for the langfuse_otel callback
+    os.environ['LANGFUSE_PUBLIC_KEY'] = settings.LANGFUSE_PUBLIC_KEY
+    os.environ['LANGFUSE_SECRET_KEY'] = settings.LANGFUSE_SECRET_KEY
+    os.environ['LANGFUSE_HOST'] = settings.LANGFUSE_BASE_URL
 
     if 'langfuse_otel' not in litellm.success_callback:
         litellm.success_callback.append('langfuse_otel')
