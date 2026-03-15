@@ -18,7 +18,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.middleware import JWTAuthMiddleware, RequestIDMiddleware, SecurityHeadersMiddleware
-from app.observability import get_langfuse, get_logger, setup_langfuse_callback, setup_logging, setup_tracing, shutdown_langfuse, shutdown_tracing
+from app.observability import get_langfuse, get_logger, setup_langfuse_env, setup_logging, setup_tracing, shutdown_langfuse, shutdown_tracing
 from app.routes import agentbench_router, auth_router, prompt_router, system_router
 from app.storage import close_redis, get_redis
 
@@ -40,9 +40,9 @@ async def lifespan(app: FastAPI):
     from app.prompt_manager import get_prompt_manager
 
     # Startup
+    setup_langfuse_env()
     setup_tracing(app)
     get_langfuse()
-    setup_langfuse_callback()
     try:
         await get_redis()
         logger.info('Redis connected')

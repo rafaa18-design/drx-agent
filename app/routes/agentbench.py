@@ -37,6 +37,9 @@ from app.models import (
     ToolExposed,
     TrajectoryStage,
 )
+from langfuse import get_client as get_langfuse_client
+from langfuse import observe, propagate_attributes
+
 from app.observability import get_logger
 from app.prompt_manager import compile_prompt, get_agent_instructions, get_prompt_manager
 from app.runtime import RunContext
@@ -248,6 +251,7 @@ class AgentRunResult:
     error: Exception | None = None
 
 
+@observe(name="agent-run")
 async def execute_agent(
     request: RunRequest,
     debug: bool = False,
@@ -349,21 +353,20 @@ async def execute_agent(
         )
         registry = get_tools_registry()
 
-        # Execute agent loop
-        response = await run_agent_loop(
-            messages=messages,
-            tools=registry,
-            run_context=run_context,
-            model=model,
-            max_iterations=settings.MAX_TURNS,
-            max_tokens=settings.MAX_OUTPUT_TOKENS,
-            langfuse_metadata={
-                'session_id': conversation_id,
-                'trace_user_id': conversation_id,
-                'trace_name': f'{settings.MODULE_NAME}-run',
-                'tags': [settings.MODULE_NAME, model_id],
-            },
-        )
+        # Execute agent loop with Langfuse tracing context
+        with propagate_attributes(
+            user_id=conversation_id,
+            session_id=conversation_id,
+            tags=[settings.AGENT_NAME, model_id],
+        ):
+            response = await run_agent_loop(
+                messages=messages,
+                tools=registry,
+                run_context=run_context,
+                model=model,
+                max_iterations=settings.MAX_TURNS,
+                max_tokens=settings.MAX_OUTPUT_TOKENS,
+            )
 
         # Store messages in Redis
         response_text = extract_response_text(response)
@@ -417,6 +420,12 @@ async def execute_agent(
         )
 
     latency_ms = (time.perf_counter() - start_time) * 1000
+
+    # Flush Langfuse traces (important for ephemeral containers like Cloud Run)
+    try:
+        get_langfuse_client().flush()
+    except Exception:
+        pass
 
     return AgentRunResult(
         response=response,

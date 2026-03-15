@@ -255,6 +255,46 @@ def _tool_call_key(name: str, args: dict) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
+async def _traced_completion(
+    model: str,
+    messages: list[dict],
+    tools: list[dict] | None,
+    temperature: float,
+    max_tokens: int,
+    iteration: int,
+):
+    """Wrap litellm.acompletion with Langfuse observation."""
+    from langfuse import get_client as _get_lf
+
+    lf = _get_lf()
+    with lf.start_as_current_observation(
+        as_type='generation',
+        name=f'llm-call-{iteration}',
+        model=model,
+        input=messages[-1] if messages else None,
+    ) as gen:
+        response = await litellm.acompletion(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice='auto' if tools else None,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        usage = getattr(response, 'usage', None)
+        output = None
+        if response.choices:
+            output = response.choices[0].message.content
+        gen.update(
+            output=output,
+            usage_details={
+                'input_tokens': getattr(usage, 'prompt_tokens', 0) or 0,
+                'output_tokens': getattr(usage, 'completion_tokens', 0) or 0,
+            } if usage else None,
+        )
+        return response
+
+
 async def run_agent_loop(
     messages: list[dict],
     tools: ToolRegistry,
@@ -272,7 +312,7 @@ async def run_agent_loop(
     - Duplicate tool call detection (returns cached result instantly)
     - Per-tool call limit (max 3 calls to same tool per turn)
     - Parallel tool execution (asyncio.gather for independent tools)
-    - Langfuse tracing (session_id, user_id, trace_name via metadata)
+    - Langfuse tracing via @observe decorator (session_id, user_id via propagate_attributes)
 
     Args:
         messages: Initial messages (system + user).
@@ -282,12 +322,11 @@ async def run_agent_loop(
         max_iterations: Maximum tool-calling iterations.
         temperature: LLM temperature.
         max_tokens: Max output tokens per LLM call.
-        langfuse_metadata: Optional Langfuse metadata (session_id, trace_user_id, etc.).
+        langfuse_metadata: Optional metadata dict (kept for backwards compat).
 
     Returns:
         AgentResponse with the final content and execution metadata.
     """
-    # Build metadata for Langfuse tracing
     metadata = langfuse_metadata or {}
 
     total_input_tokens = 0
@@ -312,20 +351,13 @@ async def run_agent_loop(
             )
 
         try:
-            # Add iteration info to metadata for Langfuse
-            call_metadata = {
-                **metadata,
-                'generation_name': f'iteration-{iteration}',
-            }
-
-            response = await litellm.acompletion(
+            response = await _traced_completion(
                 model=model,
                 messages=call_messages,
                 tools=call_tools,
-                tool_choice='auto' if call_tools else None,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                metadata=call_metadata,
+                iteration=iteration,
             )
         except Exception as e:
             logger.error(f'litellm.acompletion failed (iteration {iteration}): {e}')

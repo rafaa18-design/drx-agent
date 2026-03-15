@@ -263,14 +263,11 @@ def get_langfuse() -> Langfuse | None:
     return _langfuse
 
 
-def setup_langfuse_callback():
-    """Configure litellm to send traces to Langfuse via OTEL-based callback.
+def setup_langfuse_env():
+    """Set Langfuse environment variables for SDK auto-initialization.
 
-    Uses 'langfuse_otel' instead of legacy 'langfuse' callback,
-    which is required for langfuse SDK v3+.
-
-    Also sets the environment variables that LiteLLM reads internally
-    (LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST).
+    The Langfuse SDK v3 reads these env vars via get_client() singleton.
+    Also sets LANGFUSE_HOST for any LiteLLM native integration.
     """
     if not settings.LANGFUSE_ENABLED:
         return
@@ -280,19 +277,12 @@ def setup_langfuse_callback():
 
     import os
 
-    import litellm
-
-    # LiteLLM reads these env vars for the langfuse_otel callback
-    os.environ['LANGFUSE_PUBLIC_KEY'] = settings.LANGFUSE_PUBLIC_KEY
     os.environ['LANGFUSE_SECRET_KEY'] = settings.LANGFUSE_SECRET_KEY
+    os.environ['LANGFUSE_PUBLIC_KEY'] = settings.LANGFUSE_PUBLIC_KEY
+    os.environ['LANGFUSE_BASE_URL'] = settings.LANGFUSE_BASE_URL
     os.environ['LANGFUSE_HOST'] = settings.LANGFUSE_BASE_URL
 
-    if 'langfuse_otel' not in litellm.success_callback:
-        litellm.success_callback.append('langfuse_otel')
-    if 'langfuse_otel' not in litellm.failure_callback:
-        litellm.failure_callback.append('langfuse_otel')
-
-    logger.info('Langfuse OTEL callback configured for litellm traces')
+    logger.info('Langfuse env vars configured for SDK tracing')
 
 
 def shutdown_langfuse():
