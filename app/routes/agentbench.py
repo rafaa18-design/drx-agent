@@ -272,13 +272,6 @@ async def execute_agent(
     start_time = time.perf_counter()
     conversation_id = request.conversation_id
 
-    # Set Langfuse trace attributes (session_id, user_id)
-    lf = get_langfuse_client()
-    lf.update_current_span(
-        session_id=conversation_id,
-        user_id=conversation_id,
-    )
-
     # Phone allowlist check (early return — no LLM cost)
     if not _is_phone_allowed(conversation_id):
         logger.info(f'Phone {conversation_id} not in allowlist, skipping')
