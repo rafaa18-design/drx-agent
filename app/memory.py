@@ -154,6 +154,34 @@ def _cooldown_key(cid: str) -> str:
 # =============================================================================
 
 
+async def clear_memory(cid: str) -> None:
+    """Clear all memory-related Redis keys for a conversation.
+
+    Removes facts, log, unconsolidated counter, consolidation failures,
+    cooldown, and last_consolidated timestamp.
+    """
+    from app.storage import get_redis
+
+    client = await get_redis()
+    if client is None:
+        return
+
+    keys = [
+        _facts_key(cid),
+        _log_key(cid),
+        _unconsolidated_key(cid),
+        _last_consolidated_key(cid),
+        _failures_key(cid),
+        _cooldown_key(cid),
+    ]
+
+    try:
+        await client.delete(*keys)
+        logger.info(f'Memory cleared for {cid}')
+    except Exception as e:
+        logger.warning(f'Failed to clear memory for {cid}: {e}')
+
+
 async def get_memory_context(cid: str) -> str:
     """Get formatted memory context for prompt injection.
 

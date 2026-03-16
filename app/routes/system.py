@@ -71,6 +71,19 @@ async def profiling_stats():
     }
 
 
+@system_router.post('/reset/{conversation_id}')
+async def reset_session(conversation_id: str):
+    """Reset session state, message history, and memory for a conversation."""
+    from app.memory import clear_memory
+    from app.storage import clear_message_history, delete_session_state
+
+    await delete_session_state(conversation_id)
+    await clear_message_history(conversation_id)
+    await clear_memory(conversation_id)
+
+    return {'status': 'ok', 'conversation_id': conversation_id, 'message': 'Session reset'}
+
+
 @system_router.get('/')
 async def root():
     """Root endpoint - API information."""

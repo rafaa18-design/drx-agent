@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # Phone allowlist (empty = allow all; set to restrict agent to specific numbers)
     PHONE_ALLOWLIST: list[str] = []
 
+    # /reset command via WhatsApp (disabled by default for production)
+    RESET_COMMAND_ENABLED: bool = False
+
     # ==========================================================================
     # Model Configuration
     # ==========================================================================

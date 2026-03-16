@@ -532,6 +532,31 @@ async def run(request: RunRequest) -> RunResponse:
     """Execute the agent in production mode (AgentBench standard)."""
     logger.info(f'Running agent for conversation: {request.conversation_id}')
 
+    # Handle /reset command — clear session without calling LLM
+    if settings.RESET_COMMAND_ENABLED:
+        raw_text = ' '.join(
+            item.content for item in request.input if item.type == 'text'
+        ).strip()
+        if raw_text.lower() == '/reset':
+            from app.memory import clear_memory
+            from app.storage import clear_message_history, delete_session_state
+
+            cid = request.conversation_id
+            await delete_session_state(cid)
+            await clear_message_history(cid)
+            await clear_memory(cid)
+            logger.info(f'Session reset via /reset command: {cid}')
+
+            return RunResponse(
+                conversation_id=cid,
+                final_output=FinalOutput(
+                    message='Sessão reiniciada! Como posso ajudá-lo(a)?',
+                    state=None,
+                    actions_taken=None,
+                ),
+                metrics=Metrics(latency_ms=0, tokens_used=None, cost_estimate=None),
+            )
+
     result = await execute_agent(request, debug=False)
 
     if result.error:
