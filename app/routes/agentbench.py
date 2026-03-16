@@ -274,7 +274,7 @@ async def execute_agent(
 
     # Set Langfuse trace attributes (session_id, user_id)
     lf = get_langfuse_client()
-    lf.update_current_trace(
+    lf.update_current_span(
         session_id=conversation_id,
         user_id=conversation_id,
     )
