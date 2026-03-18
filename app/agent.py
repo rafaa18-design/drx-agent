@@ -267,10 +267,12 @@ async def _traced_completion(
     from langfuse import get_client as _get_lf
 
     lf = _get_lf()
+    # Strip provider prefix (e.g. "gemini/gemini-3-flash" → "gemini-3-flash")
+    langfuse_model = model.split('/', 1)[-1] if '/' in model else model
     with lf.start_as_current_observation(
         as_type='generation',
         name=f'llm-call-{iteration}',
-        model=model,
+        model=langfuse_model,
         input=messages[-1] if messages else None,
     ) as gen:
         response = await litellm.acompletion(
