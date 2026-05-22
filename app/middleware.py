@@ -63,8 +63,25 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
         '/prompt/webhook',
     ]
 
+    # Prefixos excluídos — rotas do CRM e WebSocket não exigem JWT do backend
+    EXCLUDED_PREFIXES = [
+        '/api/',
+        '/ws/',
+    ]
+
+    async def __call__(self, scope, receive, send):
+        # Scope "websocket" bypassa completamente o JWT — call_next não faz handshake WS
+        if scope['type'] == 'websocket':
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
     async def dispatch(self, request: Request, call_next):
-        if request.url.path in self.EXCLUDED_PATHS:
+        path = request.url.path
+        if path in self.EXCLUDED_PATHS:
+            return await call_next(request)
+
+        if any(path.startswith(prefix) for prefix in self.EXCLUDED_PREFIXES):
             return await call_next(request)
 
         # Skip OPTIONS (CORS preflight)

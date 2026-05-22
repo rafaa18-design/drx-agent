@@ -13,13 +13,14 @@ This module sets up a FastAPI application with:
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from starlette.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.middleware import JWTAuthMiddleware, RequestIDMiddleware, SecurityHeadersMiddleware
 from app.observability import get_langfuse, get_logger, setup_langfuse_env, setup_logging, setup_tracing, shutdown_langfuse, shutdown_tracing
 from app.routes import agentbench_router, auth_router, prompt_router, system_router
+from app.routes.crm import crm_router
 from app.storage import close_redis, get_redis
 
 # Setup logging early (must be before other app imports that use loggers)
@@ -112,6 +113,35 @@ app.include_router(agentbench_router)
 app.include_router(auth_router)
 app.include_router(prompt_router)
 app.include_router(system_router)
+app.include_router(crm_router)
+
+# --- WebSocket (registrado direto no app — não passa por routers aninhados) ---
+_ws_clients: list[WebSocket] = []
+
+
+@app.websocket('/ws/conversations')
+async def ws_conversations(websocket: WebSocket) -> None:
+    """WebSocket para atualizações em tempo real do CRM."""
+    await websocket.accept()
+    _ws_clients.append(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # mantém conexão viva
+    except WebSocketDisconnect:
+        _ws_clients.remove(websocket)
+
+
+async def broadcast_ws(payload: dict) -> None:
+    """Broadcast para todos os clientes WebSocket conectados."""
+    import json
+    dead = []
+    for ws in _ws_clients:
+        try:
+            await ws.send_text(json.dumps(payload))
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        _ws_clients.remove(ws)
 
 # --- Middlewares ---
 # (Order matters: first added = outermost = runs first on request)
@@ -150,12 +180,24 @@ logger.info('Security headers middleware enabled')
 
 # CORS
 cors_origins = settings.CORS_ORIGINS + ['https://agentbench.asanioficial.com']
+
+# Em desenvolvimento, adiciona localhost em todas as portas comuns
+if settings.OTEL_ENVIRONMENT != 'production':
+    cors_origins += [
+        'http://localhost:3000',
+        'http://localhost:3001',
+        'http://localhost:3002',
+        'http://localhost:3003',
+        'http://127.0.0.1:3000',
+        'http://127.0.0.1:3001',
+    ]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=['GET', 'POST', 'OPTIONS'],
-    allow_headers=['Content-Type', 'Authorization'],
+    allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allow_headers=['Content-Type', 'Authorization', 'X-Request-ID'],
 )
 logger.info(f'CORS enabled for origins: {cors_origins}')
 

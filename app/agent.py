@@ -30,19 +30,21 @@ from app.config import settings
 from app.prompt_manager import get_agent_instructions_sync
 from app.runtime import RetryAgentRun, RunContext, StopAgentRun, ToolRegistry
 from app.tools import (
-    agendar_consulta,
-    buscar_paciente,
-    calcular_orcamento,
-    cancelar_consulta,
-    consultar_convenios,
-    consultar_historico_paciente,
-    listar_servicos,
     obter_data_hora,
     salvar_dados_cliente,
     salvar_preferencias,
     ver_contexto_sessao,
-    verificar_cliente,
-    verificar_disponibilidade,
+)
+from app.tools.drx import (
+    analyze_problem_print,
+    analyze_profile_print,
+    book_appointment,
+    check_availability,
+    escalate_to_human,
+    get_lead_context,
+    qualify_lead,
+    send_whatsapp_message,
+    update_lead_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,15 +119,20 @@ def get_tools_registry() -> ToolRegistry:
     registry = ToolRegistry()
 
     all_tools = [
-        listar_servicos,
-        verificar_disponibilidade,
-        agendar_consulta,
-        cancelar_consulta,
-        buscar_paciente,
-        verificar_cliente,
-        consultar_historico_paciente,
-        consultar_convenios,
-        calcular_orcamento,
+        # DRX · Visão — análise de prints
+        analyze_profile_print,
+        analyze_problem_print,
+        # DRX · Leads e qualificação
+        qualify_lead,
+        get_lead_context,
+        update_lead_status,
+        # DRX · Agendamento
+        check_availability,
+        book_appointment,
+        # DRX · WhatsApp e escalação
+        send_whatsapp_message,
+        escalate_to_human,
+        # Sessão e contexto
         salvar_dados_cliente,
         salvar_preferencias,
         ver_contexto_sessao,
@@ -169,7 +176,12 @@ def build_system_messages(
 
     # Build current user message with optional multimodal content
     if images:
-        content_parts = [{'type': 'text', 'text': text_message}]
+        content_parts = []
+        # Gemini rejeita partes de texto vazias junto com imagens
+        content_parts.append({
+            'type': 'text',
+            'text': text_message if text_message.strip() else 'o lead enviou esta imagem',
+        })
         content_parts.extend(images)
         messages.append({'role': 'user', 'content': content_parts})
     else:
@@ -342,6 +354,7 @@ async def run_agent_loop(
     total_output_tokens = 0
     tools_used: list[str] = []
     tool_definitions = tools.get_definitions()
+    _empty_retries = 0  # limite de retries por conteúdo vazio
 
     # Prompt caching for Anthropic models
     use_cache = _supports_prompt_caching(model) and settings.CACHE_SYSTEM_PROMPT
@@ -385,11 +398,45 @@ async def run_agent_loop(
                     f'(iteration {iteration})'
                 )
 
+        if not response.choices:
+            logger.error('Gemini retornou choices vazio (iteration %d)', iteration)
+            return AgentResponse(
+                content='não consegui processar essa imagem. pode tentar enviar de novo?',
+                messages=messages,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                tools_used=tools_used,
+                session_state=run_context.session_state,
+            )
+
         message = response.choices[0].message
 
         # If no tool calls, we have the final response
         if not message.tool_calls:
             content = message.content or ''
+
+            # Gemini às vezes retorna conteúdo vazio após tool calls.
+            # Tenta até 3 vezes com mensagem explícita antes de usar fallback.
+            if not content.strip() and _empty_retries < 3:
+                _empty_retries += 1
+                logger.warning(
+                    'Gemini retornou resposta vazia (tentativa %d/3, iter %d)',
+                    _empty_retries, iteration,
+                )
+                messages.append({
+                    'role': 'user',
+                    'content': 'Responda ao lead em português agora.',
+                })
+                continue
+
+            # Após todas as tentativas, fallback para não deixar o lead sem resposta
+            if not content.strip():
+                logger.error(
+                    'Gemini retornou vazio após %d tentativas — usando fallback',
+                    _empty_retries,
+                )
+                content = 'Entendi. Pode me contar mais algum detalhe sobre o que está acontecendo?'
+
             return AgentResponse(
                 content=content,
                 messages=messages,

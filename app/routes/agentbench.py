@@ -113,39 +113,34 @@ def _model_supports_audio(model: str) -> bool:
 
 
 def transcribe_audio(audio_bytes: bytes, mime_type: str | None = None) -> str:
-    """Transcribe audio to text.
+    """Transcreve áudio para texto via google.generativeai SDK.
 
-    Tries Gemini API first (if GEMINI_API_KEY is set), falls back to OpenAI Whisper.
+    Usa o mesmo SDK das imagens — compatível com chaves AQ. (Vertex Express)
+    e AIza (AI Studio). Fallback para OpenAI Whisper se não tiver chave Gemini.
     """
-    import httpx
-
-    # 1. Try Gemini API
+    # 1. Gemini via google.generativeai SDK
     if settings.GEMINI_API_KEY:
         try:
-            b64_audio = base64.b64encode(audio_bytes).decode('utf-8')
-            resp = httpx.post(
-                f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={settings.GEMINI_API_KEY}',
-                json={
-                    'contents': [{
-                        'parts': [
-                            {'text': 'Transcreva este áudio em português. Retorne APENAS o texto transcrito, sem explicações.'},
-                            {'inline_data': {'mime_type': mime_type or 'audio/mpeg', 'data': b64_audio}},
-                        ]
-                    }],
-                },
-                timeout=30.0,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                text = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-                if text:
-                    return text.strip()
-            logger.error('Gemini transcription failed: status=%s body=%s', resp.status_code, resp.text[:300])
+            import google.generativeai as genai
+            genai.configure(api_key=settings.GEMINI_API_KEY)
+            model = genai.GenerativeModel('gemini-2.5-flash')
+
+            audio_part = {
+                'mime_type': mime_type or 'audio/mpeg',
+                'data': audio_bytes,
+            }
+            response = model.generate_content([
+                'Transcreva este áudio em português. Retorne APENAS o texto transcrito, sem explicações.',
+                audio_part,
+            ])
+            if response.text:
+                return response.text.strip()
         except Exception as e:
             logger.error('Gemini transcription error: %s', str(e))
 
-    # 2. Fallback to OpenAI Whisper
+    # 2. Fallback para OpenAI Whisper
     if settings.OPENAI_API_KEY:
+        import httpx
         ext = '.mp3'
         if mime_type:
             ext_map = {'audio/ogg': '.ogg', 'audio/mpeg': '.mp3', 'audio/wav': '.wav'}
@@ -169,19 +164,73 @@ def transcribe_audio(audio_bytes: bytes, mime_type: str | None = None) -> str:
     return '[audio não transcrito]'
 
 
+def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None) -> str | None:
+    """Analisa imagem com Gemini Flash e retorna descrição estruturada para o agente.
+
+    Retorna None em caso de falha — caller decide o fallback.
+    """
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=settings.GEMINI_API_KEY)
+        model = genai.GenerativeModel('gemini-2.5-flash')
+
+        mime = mime_type or 'image/jpeg'
+        image_part = {'mime_type': mime, 'data': image_bytes}
+
+        prompt = (
+            'Analise esta imagem e classifique-a em uma das categorias abaixo.\n\n'
+            'CATEGORIA A — Print de PROBLEMA em rede social:\n'
+            'Exemplos: tela de banimento, restrição, conta desativada, aviso, suspensão, bloqueio de funcionalidades.\n'
+            'Se for categoria A, retorne:\n'
+            '- Plataforma afetada (Instagram, TikTok, YouTube, etc.)\n'
+            '- Tipo do problema (banimento permanente, restrição temporária, aviso, etc.)\n'
+            '- Gravidade (permanente, temporário, apenas aviso)\n'
+            '- Texto principal visível na tela\n\n'
+            'CATEGORIA B — Print de PERFIL de rede social:\n'
+            'Exemplos: página de perfil com seguidores, bio, foto de capa.\n'
+            'Se for categoria B, retorne:\n'
+            '- Plataforma\n'
+            '- Nome/usuário\n'
+            '- Número de seguidores\n'
+            '- Sinais de monetização ou uso profissional\n\n'
+            'CATEGORIA C — Imagem NÃO relacionada (foto de pessoas, paisagens, documentos, etc.):\n'
+            'Retorne exatamente: [IMAGEM_INVALIDA]\n\n'
+            'Seja direto. Máximo 5 linhas para A e B. Apenas [IMAGEM_INVALIDA] para C.'
+        )
+
+        response = model.generate_content([prompt, image_part])
+        if response.text and response.text.strip():
+            logger.info('analyze_image_direct: ok (%d chars)', len(response.text))
+            return response.text.strip()
+        logger.warning('analyze_image_direct: resposta vazia')
+
+    except Exception as e:
+        logger.error('analyze_image_direct falhou: %s', str(e), exc_info=True)
+
+    return None
+
+
 def parse_multimodal_input(
     items: list[InputItem],
     model: str = '',
+    conversation_id: str = '',
 ) -> tuple[str, list[dict]]:
     """Parse multimodal input items into litellm content parts.
 
+    Imagens são analisadas via Gemini Flash direto e armazenadas no image_store
+    para uso pelas vision tools sem necessidade de repassar base64.
+
     Args:
         items: Input items from the request.
-        model: The litellm model string (used to check native audio support).
+        model: The litellm model string (usado para verificar suporte a áudio nativo).
+        conversation_id: ID da conversa para indexar as imagens no cache.
 
     Returns:
         Tuple of (text_message, media_content_parts).
     """
+    from app.tools.drx.image_store import store_image
+
     text_parts: list[str] = []
     media: list[dict] = []
 
@@ -190,12 +239,34 @@ def parse_multimodal_input(
             text_parts.append(item.content)
         elif item.type == 'image':
             content_bytes = base64.b64decode(item.content)
-            b64_str = base64.b64encode(content_bytes).decode('utf-8')
             mime = item.mime_type or 'image/jpeg'
-            media.append({
-                'type': 'image_url',
-                'image_url': {'url': f'data:{mime};base64,{b64_str}'},
-            })
+            filename = item.filename or 'imagem'
+
+            # Guarda no cache para as vision tools atualizarem o CRM
+            if conversation_id:
+                store_image(conversation_id, content_bytes, mime, filename)
+
+            # Analisa server-side — o agente recebe o resultado pronto
+            analysis = analyze_image_direct(content_bytes, mime)
+
+            if analysis == '[IMAGEM_INVALIDA]':
+                text_parts.append(
+                    f'[Imagem recebida: {filename}] '
+                    f'IMAGEM NÃO RELACIONADA AO CASO — não é print de problema nem perfil de rede social. '
+                    f'Peça educadamente que o lead envie o print correto do problema ou do perfil.'
+                )
+            elif analysis:
+                text_parts.append(
+                    f'[Print recebido do lead — {filename}]\n'
+                    f'{analysis}\n'
+                    f'[Use analyze_problem_print ou analyze_profile_print para salvar no CRM]'
+                )
+            else:
+                text_parts.append(
+                    f'[Print recebido: {filename}] '
+                    f'Não consegui ler a imagem. '
+                    f'Informe o lead que recebeu e pergunte o que está escrito na tela.'
+                )
         elif item.type == 'audio':
             content_bytes = base64.b64decode(item.content)
             if _model_supports_audio(model):
@@ -298,9 +369,11 @@ async def execute_agent(
     actions: list[ActionTaken] = []
 
     try:
-        # Parse multimodal input
+        # Parse multimodal input (passa conversation_id para indexar imagens no cache)
         model = get_litellm_model(model_id)
-        text_message, images = parse_multimodal_input(request.input, model=model)
+        text_message, images = parse_multimodal_input(
+            request.input, model=model, conversation_id=conversation_id
+        )
 
         # Audit log run start
         audit_agent_run_start(

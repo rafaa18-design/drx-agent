@@ -1259,12 +1259,27 @@ function ChatScreen({ token, dark, c, onToggleTheme }: {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [attachedFile, setAttachedFile] = useState<AttachedFile | null>(null);
-  const conversationId = useRef(uuid());
+  const defaultPhone = process.env.NEXT_PUBLIC_TEST_PHONE || uuid();
+  const conversationId = useRef(defaultPhone);
+  const [phoneDisplay, setPhoneDisplay] = useState(defaultPhone);
+  const [editingPhone, setEditingPhone] = useState(false);
+  const [phoneInput, setPhoneInput] = useState(defaultPhone);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const phoneInputRef = useRef<HTMLInputElement>(null);
   const [headerHover, setHeaderHover] = useState<string | null>(null);
   const mdComponents = useMdComponents(c);
+
+  function applyPhone(value: string) {
+    const trimmed = value.trim() || defaultPhone;
+    conversationId.current = trimmed;
+    setPhoneDisplay(trimmed);
+    setPhoneInput(trimmed);
+    setEditingPhone(false);
+    setMessages([]);
+    setInput("");
+  }
 
   useEffect(() => {
     setTimeout(() => inputRef.current?.focus(), 200);
@@ -1399,7 +1414,8 @@ function ChatScreen({ token, dark, c, onToggleTheme }: {
   function clearConversation() {
     setMessages([]);
     setInput("");
-    conversationId.current = uuid();
+    // Mantém o mesmo telefone de teste ao limpar — reinicia só o histórico
+    conversationId.current = process.env.NEXT_PUBLIC_TEST_PHONE || uuid();
   }
 
   const hasMessages = messages.length > 0;
@@ -1451,13 +1467,61 @@ function ChatScreen({ token, dark, c, onToggleTheme }: {
               background: "linear-gradient(180deg, #ffffff 0%, #4a4a4a 100%)",
               flexShrink: 0,
             }} />
-            <span style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: c.text,
-            }}>
+            <span style={{ fontSize: 14, fontWeight: 500, color: c.text }}>
               Agent
             </span>
+          </div>
+
+          {/* Center: phone switcher */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            {editingPhone ? (
+              <input
+                ref={phoneInputRef}
+                autoFocus
+                value={phoneInput}
+                onChange={(e) => setPhoneInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") applyPhone(phoneInput);
+                  if (e.key === "Escape") setEditingPhone(false);
+                }}
+                onBlur={() => applyPhone(phoneInput)}
+                placeholder="ex: 5511999990001"
+                style={{
+                  padding: "4px 10px",
+                  fontSize: 12,
+                  fontFamily: "monospace",
+                  color: c.text,
+                  background: c.inputBg,
+                  border: `1px solid ${c.border}`,
+                  borderRadius: 8,
+                  outline: "none",
+                  width: 180,
+                }}
+              />
+            ) : (
+              <button
+                onClick={() => { setEditingPhone(true); setPhoneInput(phoneDisplay); }}
+                title="Clique para trocar o número de teste"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 5,
+                  padding: "4px 10px",
+                  fontSize: 11,
+                  fontFamily: "monospace",
+                  color: c.textSecondary,
+                  background: c.inputBg,
+                  border: `1px solid ${c.border}`,
+                  borderRadius: 8,
+                  cursor: "pointer",
+                  transition: "all 0.15s",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.color = c.text)}
+                onMouseLeave={(e) => (e.currentTarget.style.color = c.textSecondary)}
+              >
+                📱 {phoneDisplay}
+              </button>
+            )}
           </div>
 
           {/* Right: buttons */}

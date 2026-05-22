@@ -1,14 +1,19 @@
 """Alembic environment configuration."""
 
 import asyncio
+import os
 from logging.config import fileConfig
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Carrega o .env da raiz do projeto
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
-
-from app.config import settings
 
 # Alembic Config object
 config = context.config
@@ -17,13 +22,12 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Set the database URL from settings
-config.set_main_option('sqlalchemy.url', settings.POSTGRES_URL)
+# Set the database URL from environment variable
+config.set_main_option('sqlalchemy.url', os.environ["DATABASE_URL"])
 
-# Add your model's MetaData object here for autogenerate support
-# from app.models import Base
-# target_metadata = Base.metadata
-target_metadata = None
+# Modelos CRM DRX
+from app.db.models import Base  # noqa: E402
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
@@ -71,6 +75,10 @@ async def run_async_migrations() -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
+    # Windows usa ProactorEventLoop por padrão, incompatível com psycopg async.
+    # Força SelectorEventLoop para compatibilidade.
+    if asyncio.get_event_loop_policy().__class__.__name__ == "WindowsProactorEventLoopPolicy":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(run_async_migrations())
 
 

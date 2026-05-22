@@ -1,71 +1,75 @@
 """Tools de sessão: salvar dados do cliente, preferências e ver contexto."""
 
+import logging
 from datetime import datetime
 
-from app.runtime import RunContext, tool
+import httpx
 
+from app.runtime import RunContext, tool
 from app.tools._helpers import ensure_state
+
+logger = logging.getLogger(__name__)
+_API = "http://localhost:8000"
 
 
 @tool
-def salvar_dados_cliente(
+async def salvar_dados_cliente(
     run_context: RunContext,
-    nome: str,
-    paciente_id: str = "",
+    nome: str = "",
     telefone: str = "",
     email: str = "",
-    convenio: str = "",
-    cpf: str = "",
 ) -> str:
-    """Salva ou atualiza os dados cadastrais do cliente da sessão atual.
+    """Salva nome, telefone e e-mail do lead na sessão e atualiza o CRM.
 
-    IMPORTANTE: Use esta ferramenta SEMPRE que o paciente informar dados pessoais
-    como nome, telefone, e-mail, convênio ou CPF. Isso garante que os dados persistam
-    durante toda a conversa, mesmo em interações longas.
-
-    Apenas preencha os campos que o paciente informou. Campos vazios não sobrescrevem
-    dados já salvos.
+    Use sempre que o lead informar dados pessoais durante a conversa.
+    Campos vazios não sobrescrevem dados já salvos.
 
     Args:
-        nome: Nome completo do paciente.
-        paciente_id: ID do paciente no sistema (ex: PAC001), se já localizado.
-        telefone: Telefone com DDD.
-        email: E-mail do paciente.
-        convenio: Nome do convênio (ex: OdontoPrev, Bradesco Dental).
-        cpf: CPF do paciente.
+        nome: Nome completo do lead.
+        telefone: Número com DDD (ex: 11999990001).
+        email: E-mail do lead (opcional).
 
     Returns:
         Confirmação dos dados salvos.
     """
     state = ensure_state(run_context)
 
-    if "cliente" not in state:
-        state["cliente"] = {}
-
-    cliente = state["cliente"]
-
-    # Só atualiza campos que foram informados (não-vazios)
+    # Atualiza session_state
     if nome:
-        cliente["nome"] = nome
-    if paciente_id:
-        cliente["paciente_id"] = paciente_id
+        state["client_name"] = nome
     if telefone:
-        cliente["telefone"] = telefone
+        state["phone"] = telefone
+    elif not state.get("phone") and run_context.session_id:
+        # Usa session_id como telefone se ainda não tiver número registrado
+        import re
+        if len(re.sub(r"\D", "", run_context.session_id)) >= 8:
+            state["phone"] = run_context.session_id
     if email:
-        cliente["email"] = email
-    if convenio:
-        cliente["convenio"] = convenio
-    if cpf:
-        cliente["cpf"] = cpf
+        state["client_email"] = email
 
-    cliente["atualizado_em"] = datetime.now().isoformat()
+    # Persiste no CRM se já tiver o lead criado
+    db_lead_id = state.get("db_lead_id")
+    if db_lead_id:
+        patch: dict = {}
+        if nome:
+            patch["name"] = nome
+        if telefone:
+            patch["phone"] = telefone
+        if email:
+            patch["email"] = email
+        if patch:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.patch(f"{_API}/api/leads/{db_lead_id}", json=patch)
+            except Exception as e:
+                logger.warning("Falha ao atualizar dados no CRM: %s", e)
 
-    partes = ["Dados do cliente salvos:"]
-    for k, v in cliente.items():
-        if k != "atualizado_em" and v:
-            partes.append(f"  • {k}: {v}")
+    salvos = []
+    if nome:     salvos.append(f"nome: {nome}")
+    if telefone: salvos.append(f"telefone: {telefone}")
+    if email:    salvos.append(f"email: {email}")
 
-    return "\n".join(partes)
+    return "Dados salvos: " + ", ".join(salvos) if salvos else "Nenhum dado novo informado."
 
 
 @tool
