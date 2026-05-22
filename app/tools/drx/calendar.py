@@ -37,8 +37,14 @@ async def check_availability(date: str, duration_minutes: int = 60) -> str:
         slots = await service.get_available_slots(date, duration_minutes)
         if not slots:
             return f"Nenhum horário disponível em {dia_semana}, {data_formatada}. Sugira outra data."
-        slots_str = ", ".join(slots)
-        return f"DATA CONFIRMADA: {dia_semana}, {data_formatada} (use exatamente essa data ao falar com o cliente)\nHorários disponíveis: {slots_str}"
+
+        # Retorna datetime ISO completo para cada slot — use diretamente em book_appointment
+        linhas = [f"DATA: {dia_semana}, {data_formatada} ({date})"]
+        linhas.append("Horários disponíveis (use o campo slot_iso em book_appointment):")
+        for s in slots:
+            iso = f"{date}T{s}:00"
+            linhas.append(f"  - {s} → slot_iso={iso}")
+        return "\n".join(linhas)
     except Exception as e:
         raise RetryAgentRun(f"Erro ao consultar agenda: {e}")
 
@@ -57,7 +63,7 @@ async def book_appointment(
     O lead_id é obtido automaticamente da sessão.
 
     Args:
-        slot_datetime: Data e hora no formato ISO (ex: 2025-03-15T10:00:00).
+        slot_datetime: Data e hora ISO exata retornada por check_availability (ex: 2026-05-23T09:00:00). NUNCA construa esse valor manualmente — copie o slot_iso do resultado de check_availability.
         client_name: Nome completo do cliente.
         channel: Canal da reunião — "meet" para Google Meet, "whatsapp" para WhatsApp.
         appointment_type: Tipo de consulta (initial_consultation, follow_up).
