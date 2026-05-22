@@ -1259,8 +1259,8 @@ function ChatScreen({ token, dark, c, onToggleTheme }: {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [attachedFile, setAttachedFile] = useState<AttachedFile | null>(null);
-  const defaultPhone = process.env.NEXT_PUBLIC_TEST_PHONE || uuid();
-  const conversationId = useRef(defaultPhone);
+  const defaultPhone = process.env.NEXT_PUBLIC_TEST_PHONE || "5511999990001";
+  const conversationId = useRef(process.env.NEXT_PUBLIC_TEST_PHONE || uuid());
   const [phoneDisplay, setPhoneDisplay] = useState(defaultPhone);
   const [editingPhone, setEditingPhone] = useState(false);
   const [phoneInput, setPhoneInput] = useState(defaultPhone);
@@ -1415,7 +1415,7 @@ function ChatScreen({ token, dark, c, onToggleTheme }: {
     setMessages([]);
     setInput("");
     // Mantém o mesmo telefone de teste ao limpar — reinicia só o histórico
-    conversationId.current = process.env.NEXT_PUBLIC_TEST_PHONE || uuid();
+    conversationId.current = defaultPhone;
   }
 
   const hasMessages = messages.length > 0;
