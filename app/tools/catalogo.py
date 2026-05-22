@@ -158,10 +158,11 @@ def obter_data_hora() -> str:
     return (
         f'A hora atual é {hora} e a data é {data}, '
         f'hoje o dia da semana é {dia_semana_hoje}.\n'
-        f'A próxima {dia_semana_hoje} será dia {proxima_semana.strftime("%d/%m/%Y")}.\n'
-        f'Amanhã é {fmt(amanha)}.\n'
-        f'Depois de amanhã é {fmt(depois_amanha)}.\n'
-        f'Daqui a 15 dias será {fmt(quinze_dias)}.\n'
-        f'Daqui a 1 mês será {fmt(um_mes)}.\n'
-        f'Daqui a 3 meses será {fmt(tres_meses)}.'
+        f'A próxima {dia_semana_hoje} será dia {proxima_semana.strftime("%d/%m/%Y")} (ISO: {proxima_semana.strftime("%Y-%m-%d")}).\n'
+        f'Amanhã é {fmt(amanha)} (ISO: {amanha.strftime("%Y-%m-%d")}).\n'
+        f'Depois de amanhã é {fmt(depois_amanha)} (ISO: {depois_amanha.strftime("%Y-%m-%d")}).\n'
+        f'Daqui a 15 dias será {fmt(quinze_dias)} (ISO: {quinze_dias.strftime("%Y-%m-%d")}).\n'
+        f'Daqui a 1 mês será {fmt(um_mes)} (ISO: {um_mes.strftime("%Y-%m-%d")}).\n'
+        f'Daqui a 3 meses será {fmt(tres_meses)} (ISO: {tres_meses.strftime("%Y-%m-%d")}).\n'
+        f'IMPORTANTE: use sempre o formato ISO (YYYY-MM-DD) ao chamar check_availability.'
     )
