@@ -28,12 +28,17 @@ async def check_availability(date: str, duration_minutes: int = 60) -> str:
     from app.services.calendar_service import CalendarService
 
     try:
+        from datetime import datetime
+        dt = datetime.strptime(date, "%Y-%m-%d")
+        data_formatada = dt.strftime("%d/%m/%Y")
+        dia_semana = ["Segunda-feira","Terça-feira","Quarta-feira","Quinta-feira","Sexta-feira","Sábado","Domingo"][dt.weekday()]
+
         service = CalendarService()
         slots = await service.get_available_slots(date, duration_minutes)
         if not slots:
-            return f"Nenhum horário disponível em {date}. Sugira outra data."
-        slots_str = "\n".join(f"- {s}" for s in slots)
-        return f"Horários disponíveis em {date}:\n{slots_str}"
+            return f"Nenhum horário disponível em {dia_semana}, {data_formatada}. Sugira outra data."
+        slots_str = ", ".join(slots)
+        return f"DATA CONFIRMADA: {dia_semana}, {data_formatada} (use exatamente essa data ao falar com o cliente)\nHorários disponíveis: {slots_str}"
     except Exception as e:
         raise RetryAgentRun(f"Erro ao consultar agenda: {e}")
 
