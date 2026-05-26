@@ -38,9 +38,12 @@ async def check_availability(date: str, duration_minutes: int = 60) -> str:
         if not slots:
             return f"Nenhum horário disponível em {dia_semana}, {data_formatada}. Sugira outra data."
 
-        # Retorna datetime ISO completo para cada slot — use diretamente em book_appointment
-        linhas = [f"DATA: {dia_semana}, {data_formatada} ({date})"]
-        linhas.append("Horários disponíveis (use o campo slot_iso em book_appointment):")
+        from datetime import datetime as _now_dt
+        ano_atual = _now_dt.now().year
+
+        linhas = [f"ANO ATUAL: {ano_atual} — use este ano em todos os agendamentos."]
+        linhas.append(f"DATA: {dia_semana}, {data_formatada} ({date})")
+        linhas.append("INSTRUÇÃO: copie o campo slot_iso abaixo EXATAMENTE em book_appointment. NÃO construa o valor manualmente.")
         for s in slots:
             iso = f"{date}T{s}:00"
             linhas.append(f"  - {s} → slot_iso={iso}")
@@ -72,6 +75,23 @@ async def book_appointment(
         Confirmação com data/hora e canal.
     """
     import os
+    from datetime import datetime as _dt
+
+    # Rejeita ano errado — o modelo às vezes constrói datas com ano defasado
+    try:
+        _parsed = _dt.fromisoformat(slot_datetime)
+        _current_year = _dt.now().year
+        if _parsed.year != _current_year:
+            raise RetryAgentRun(
+                f"ERRO: slot_datetime tem o ano {_parsed.year}, mas o ano atual é {_current_year}. "
+                f"Copie o valor slot_iso EXATAMENTE como retornado por check_availability — "
+                f"não construa o valor manualmente. Exemplo correto: {_current_year}-05-27T10:00:00"
+            )
+    except ValueError:
+        raise RetryAgentRun(
+            f"slot_datetime inválido: '{slot_datetime}'. "
+            f"Use o formato ISO retornado por check_availability: YYYY-MM-DDTHH:MM:SS"
+        )
 
     db_lead_id = run_context.session_state.get("db_lead_id")
     if not db_lead_id:

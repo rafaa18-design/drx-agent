@@ -56,6 +56,10 @@ class Lead(Base):
     ai_active: Mapped[bool] = mapped_column(Boolean, default=True)
     ai_silenced_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Follow-up pós-reunião (FU01=1, FU02=2, FU03=3)
+    follow_up_count: Mapped[int] = mapped_column(Integer, default=0)
+    follow_up_last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, server_default=func.now())
 
