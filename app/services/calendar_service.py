@@ -54,9 +54,9 @@ class CalendarService:
             now = datetime.now(tz=TIMEZONE)
             target = datetime.strptime(date_str, "%Y-%m-%d").date()
 
-            # Remove slots já passados (com 30min de margem) se for hoje
+            # Remove slots já passados (margem de 5min) se for hoje
             if target == now.date():
-                cutoff = now + timedelta(minutes=30)
+                cutoff = now + timedelta(minutes=5)
                 available = [
                     s for s in all_slots
                     if datetime.combine(target, time.fromisoformat(s), tzinfo=TIMEZONE) > cutoff
@@ -66,28 +66,39 @@ class CalendarService:
 
             # Remove slots já agendados no banco CRM
             try:
+                from datetime import timezone as _utc
                 from app.db.session import AsyncSessionLocal
                 from app.db.models import Appointment as ApptModel
                 from sqlalchemy import select as sa_select
+
+                # Usa UTC naive para comparação — compatível com como o Postgres armazena
+                day_start_utc = datetime.combine(target, time(0, 0), tzinfo=TIMEZONE).astimezone(_utc).replace(tzinfo=None)
+                day_end_utc   = datetime.combine(target, time(23, 59), tzinfo=TIMEZONE).astimezone(_utc).replace(tzinfo=None)
+
                 async with AsyncSessionLocal() as db:
-                    day_start = datetime.combine(target, time(0, 0), tzinfo=TIMEZONE)
-                    day_end   = datetime.combine(target, time(23, 59), tzinfo=TIMEZONE)
                     result = await db.execute(
                         sa_select(ApptModel.scheduled_at).where(
-                            ApptModel.scheduled_at >= day_start,
-                            ApptModel.scheduled_at <= day_end,
+                            ApptModel.scheduled_at >= day_start_utc,
+                            ApptModel.scheduled_at <= day_end_utc,
                             ApptModel.status.notin_(["cancelled"]),
                         )
                     )
-                    booked = {
-                        row[0].astimezone(TIMEZONE).strftime("%H:%M")
-                        for row in result.all()
-                    }
+                    booked = set()
+                    for row in result.all():
+                        dt = row[0]
+                        if dt is None:
+                            continue
+                        # Trata tanto naive (UTC do banco) quanto aware
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=_utc)
+                        booked.add(dt.astimezone(TIMEZONE).strftime("%H:%M"))
+
                     available = [s for s in available if s not in booked]
-                    logger.info("[MOCK] slots booked on %s: %s", date_str, booked)
+                    logger.info("[MOCK] slots booked on %s: %s | available: %s", date_str, booked, available)
             except Exception as e:
                 logger.warning("[MOCK] Falha ao verificar agendamentos no banco: %s", e)
 
+            logger.info("[MOCK] Slots disponíveis para %s: %s", date_str, available)
             return available
 
         """Retorna lista de horários disponíveis (HH:MM) para a data."""
