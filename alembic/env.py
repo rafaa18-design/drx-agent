@@ -4,6 +4,7 @@ import asyncio
 import os
 from logging.config import fileConfig
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 from dotenv import load_dotenv
 
@@ -13,7 +14,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.ext.asyncio import create_async_engine
 
 # Alembic Config object
 config = context.config
@@ -22,8 +23,34 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Set the database URL from environment variable
-config.set_main_option('sqlalchemy.url', os.environ["DATABASE_URL"])
+
+def _build_db_url() -> tuple[str, dict]:
+    """Normaliza a DATABASE_URL para asyncpg e extrai connect_args (SSL).
+
+    Mesma lógica de app/db/session.py — garante compatibilidade com
+    provedores como Neon/Supabase que mandam sslmode/channel_binding.
+    """
+    raw = os.environ["DATABASE_URL"]
+    if raw.startswith("postgresql://"):
+        raw = raw.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif raw.startswith("postgresql+psycopg://"):
+        raw = raw.replace("postgresql+psycopg://", "postgresql+asyncpg://", 1)
+
+    connect_args: dict = {}
+    parts = urlsplit(raw)
+    query = dict(parse_qsl(parts.query))
+    sslmode = query.pop("sslmode", None)
+    query.pop("channel_binding", None)  # asyncpg não suporta
+    raw = urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+    )
+    if sslmode and sslmode != "disable":
+        connect_args["ssl"] = True
+    return raw, connect_args
+
+
+_DB_URL, _CONNECT_ARGS = _build_db_url()
+config.set_main_option('sqlalchemy.url', _DB_URL)
 
 # Modelos CRM DRX
 from app.db.models import Base  # noqa: E402
@@ -61,10 +88,10 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_async_migrations() -> None:
     """Run migrations in 'online' mode with async engine."""
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix='sqlalchemy.',
+    connectable = create_async_engine(
+        _DB_URL,
         poolclass=pool.NullPool,
+        connect_args=_CONNECT_ARGS,
     )
 
     async with connectable.connect() as connection:

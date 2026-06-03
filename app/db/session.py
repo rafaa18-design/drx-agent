@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import AsyncGenerator
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -14,12 +15,29 @@ if _raw_url.startswith("postgresql://"):
 elif _raw_url.startswith("postgresql+psycopg://"):
     _raw_url = _raw_url.replace("postgresql+psycopg://", "postgresql+asyncpg://", 1)
 
+# Provedores como Neon mandam params (sslmode, channel_binding) que o asyncpg
+# não entende na URL. Remove esses params e ativa SSL via connect_args.
+_connect_args: dict = {}
+if _raw_url:
+    _parts = urlsplit(_raw_url)
+    _query = dict(parse_qsl(_parts.query))
+    _sslmode = _query.pop("sslmode", None)
+    _query.pop("channel_binding", None)  # asyncpg não suporta
+    # Reconstrói a URL sem os params incompatíveis
+    _raw_url = urlunsplit(
+        (_parts.scheme, _parts.netloc, _parts.path, urlencode(_query), _parts.fragment)
+    )
+    # Ativa SSL quando o provedor exige (Neon/Supabase usam sslmode=require)
+    if _sslmode and _sslmode != "disable":
+        _connect_args["ssl"] = True
+
 engine = create_async_engine(
     _raw_url,
     echo=False,
     pool_pre_ping=True,
     pool_size=5,
     max_overflow=10,
+    connect_args=_connect_args,
 )
 
 AsyncSessionLocal = async_sessionmaker(
