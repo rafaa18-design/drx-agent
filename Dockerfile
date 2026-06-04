@@ -77,5 +77,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the application (usa $PORT do Render/host, fallback 8000)
-CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --loop uvloop
+# Run the application — porta fixa 8000 (Render detecta automaticamente).
+# IMPORTANTE: as tools internas chamam http://localhost:8000, então o app
+# DEVE escutar na 8000 para o agente conseguir salvar leads/agendamentos.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--loop", "uvloop"]
