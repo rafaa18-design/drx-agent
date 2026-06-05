@@ -95,9 +95,36 @@ async def book_appointment(
 
     db_lead_id = run_context.session_state.get("db_lead_id")
     if not db_lead_id:
+        # Recuperação automática: busca ou cria o lead pelo telefone da sessão,
+        # para o agendamento nunca quebrar mesmo se get_lead_context não rodou.
+        phone = (
+            run_context.session_state.get("phone")
+            or getattr(run_context, "conversation_id", None)
+            or getattr(run_context, "session_id", None)
+        )
+        if phone:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as _http:
+                    _r = await _http.get(f"{_API}/api/leads", params={"search": phone})
+                    _items = _r.json().get("items", []) if _r.status_code == 200 else []
+                    if _items:
+                        db_lead_id = _items[0]["id"]
+                    else:
+                        _c = await _http.post(f"{_API}/api/leads", json={
+                            "phone": str(phone),
+                            "name": run_context.session_state.get("client_name") or client_name,
+                            "source": run_context.session_state.get("lead_source", "unknown"),
+                        })
+                        if _c.status_code in (200, 201):
+                            db_lead_id = _c.json()["id"]
+                if db_lead_id:
+                    run_context.session_state["db_lead_id"] = db_lead_id
+            except Exception as e:
+                logger.warning("Falha na recuperação automática do lead: %s", e)
+
+    if not db_lead_id:
         raise RetryAgentRun(
-            "Não encontrei o ID do lead na sessão. "
-            "Chame get_lead_context antes de agendar."
+            "Não consegui localizar o lead. Chame get_lead_context com o telefone antes de agendar."
         )
 
     # Guarda contra chamada dupla — retorna o agendamento já criado
