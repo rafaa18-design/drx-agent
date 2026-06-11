@@ -93,47 +93,13 @@ async def book_appointment(
             f"Use o formato ISO retornado por check_availability: YYYY-MM-DDTHH:MM:SS"
         )
 
-    db_lead_id = run_context.session_state.get("db_lead_id")
-    if not db_lead_id:
-        # Recuperação automática: busca ou cria o lead pelo telefone da sessão,
-        # para o agendamento nunca quebrar mesmo se get_lead_context não rodou.
-        phone = (
-            run_context.session_state.get("phone")
-            or getattr(run_context, "conversation_id", None)
-            or getattr(run_context, "session_id", None)
-        )
-        if phone:
-            try:
-                async with httpx.AsyncClient(timeout=10.0) as _http:
-                    _r = await _http.get(f"{_API}/api/leads", params={"search": phone})
-                    _items = _r.json().get("items", []) if _r.status_code == 200 else []
-                    if _items:
-                        db_lead_id = _items[0]["id"]
-                    else:
-                        _c = await _http.post(f"{_API}/api/leads", json={
-                            "phone": str(phone),
-                            "name": run_context.session_state.get("client_name") or client_name,
-                            "source": run_context.session_state.get("lead_source", "unknown"),
-                        })
-                        if _c.status_code in (200, 201):
-                            db_lead_id = _c.json()["id"]
-                if db_lead_id:
-                    run_context.session_state["db_lead_id"] = db_lead_id
-            except Exception as e:
-                logger.warning("Falha na recuperação automática do lead: %s", e)
-
-    if not db_lead_id:
-        raise RetryAgentRun(
-            "Não consegui localizar o lead. Chame get_lead_context com o telefone antes de agendar."
-        )
+    from zoneinfo import ZoneInfo
 
     # Guarda contra chamada dupla — retorna o agendamento já criado
     existing = run_context.session_state.get("last_appointment")
     if existing and existing.get("scheduled_at"):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
         try:
-            dt = datetime.fromisoformat(str(existing["scheduled_at"])).replace(
+            dt = _dt.fromisoformat(str(existing["scheduled_at"])).replace(
                 tzinfo=ZoneInfo("America/Sao_Paulo")
             )
             formatted = dt.strftime("%d/%m/%Y às %H:%M")
@@ -142,45 +108,88 @@ async def book_appointment(
         meet_line = f"\nLink Meet: {existing['google_meet_link']}" if existing.get("google_meet_link") else ""
         return f"Agendamento já registrado.\nData: {formatted}{meet_line}"
 
+    # Resolve o telefone da sessão para localizar/criar o lead
+    phone = (
+        run_context.session_state.get("phone")
+        or getattr(run_context, "conversation_id", None)
+        or getattr(run_context, "session_id", None)
+    )
+    db_lead_id = run_context.session_state.get("db_lead_id")
+    duration = int(os.environ.get("APPOINTMENT_DURATION_MINUTES", "60"))
+
+    # Grava DIRETO no banco — sem depender de HTTP interno (mais robusto no Render)
+    from app.db.session import AsyncSessionLocal
+    from app.db.models import Appointment as ApptModel, Lead as LeadModel
+    from sqlalchemy import select as sa_select
+
     try:
-        duration = int(os.environ.get("APPOINTMENT_DURATION_MINUTES", "60"))
-
-        async with httpx.AsyncClient(timeout=10.0) as http:
-            # Cria agendamento no CRM (que chama Calendar internamente)
-            r = await http.post(f"{_API}/api/appointments", json={
-                "lead_id": db_lead_id,
-                "scheduled_at": slot_datetime,
-                "duration_minutes": duration,
-                "appointment_type": appointment_type,
-                "channel": channel,
-                "notes": f"Cliente: {client_name} | Canal: {channel}",
-            })
-
-            if r.status_code not in (200, 201):
+        async with AsyncSessionLocal() as db:
+            # Localiza o lead por id, depois por telefone; cria se não existir
+            lead = None
+            if db_lead_id:
+                lead = await db.get(LeadModel, db_lead_id)
+            if lead is None and phone:
+                res = await db.execute(
+                    sa_select(LeadModel).where(LeadModel.phone == str(phone))
+                )
+                lead = res.scalar_one_or_none()
+            if lead is None and phone:
+                lead = LeadModel(
+                    phone=str(phone),
+                    name=run_context.session_state.get("client_name") or client_name,
+                    source=run_context.session_state.get("lead_source", "unknown"),
+                )
+                db.add(lead)
+                await db.flush()
+            if lead is None:
                 raise RetryAgentRun(
-                    f"Erro ao registrar agendamento no CRM: {r.status_code} — {r.text[:200]}"
+                    "Não consegui localizar o lead. Chame get_lead_context com o telefone antes de agendar."
                 )
 
-            appt = r.json()
+            run_context.session_state["db_lead_id"] = lead.id
 
-            # Atualiza status do lead para "proposal"
-            await http.patch(f"{_API}/api/leads/{db_lead_id}", json={
-                "commercial_status": "proposal"
-            })
-
-        run_context.session_state["last_appointment"] = appt
-
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-        try:
-            dt = datetime.fromisoformat(slot_datetime).replace(
-                tzinfo=ZoneInfo("America/Sao_Paulo")
+            appt = ApptModel(
+                lead_id=lead.id,
+                scheduled_at=_parsed,
+                duration_minutes=duration,
+                appointment_type=appointment_type,
+                notes=f"Cliente: {client_name} | Canal: {channel}",
+                status="scheduled",
             )
-            formatted = dt.strftime("%d/%m/%Y às %H:%M")
-        except Exception:
-            formatted = slot_datetime
 
-        meet_line = f"\nLink Meet: {appt['google_meet_link']}" if appt.get("google_meet_link") else ""
+            # Cria evento no Google Calendar (mock em dev) quando for Meet
+            meet_link = None
+            if channel != "whatsapp":
+                try:
+                    from app.services.calendar_service import CalendarService
+                    service = CalendarService()
+                    result = await service.create_appointment(
+                        lead_id=lead.id,
+                        slot_datetime=_parsed.isoformat(),
+                        client_name=lead.name or lead.phone,
+                        appointment_type=appointment_type,
+                    )
+                    appt.google_event_id = result.get("event_id")
+                    appt.google_meet_link = result.get("meet_link")
+                    meet_link = result.get("meet_link")
+                except Exception as e:
+                    logger.warning("Falha ao criar evento no Calendar: %s", e)
+
+            db.add(appt)
+            lead.commercial_status = "proposal"
+            await db.commit()
+            await db.refresh(appt)
+
+            appt_id = appt.id
+
+        run_context.session_state["last_appointment"] = {
+            "id": appt_id,
+            "scheduled_at": _parsed.isoformat(),
+            "google_meet_link": meet_link,
+        }
+
+        formatted = _parsed.replace(tzinfo=ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y às %H:%M")
+        meet_line = f"\nLink Meet: {meet_link}" if meet_link else ""
         return (
             f"AGENDAMENTO SALVO COM SUCESSO. Responda ao lead confirmando.\n"
             f"Data: {formatted}\n"
@@ -191,4 +200,5 @@ async def book_appointment(
     except RetryAgentRun:
         raise
     except Exception as e:
+        logger.error("book_appointment falhou: %s", e)
         raise RetryAgentRun(f"Erro ao criar agendamento: {e}")
