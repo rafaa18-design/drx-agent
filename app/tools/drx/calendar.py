@@ -51,6 +51,10 @@ async def check_availability(run_context: RunContext, date: str, duration_minute
         from datetime import datetime as _now_dt
         ano_atual = _now_dt.now().year
 
+        # Guarda os slots válidos na sessão — book_appointment valida contra essa lista
+        # (o modelo às vezes troca mês/dia ao copiar o slot_iso de cabeça).
+        run_context.session_state["available_slots"] = [f"{date}T{s}:00" for s in slots]
+
         linhas = [f"ANO ATUAL: {ano_atual} — use este ano em todos os agendamentos."]
         linhas.append(f"DATA: {dia_semana}, {data_formatada} ({date})")
         linhas.append("INSTRUÇÃO: copie o campo slot_iso abaixo EXATAMENTE em book_appointment. NÃO construa o valor manualmente.")
@@ -106,6 +110,15 @@ async def book_appointment(
         raise RetryAgentRun(
             f"slot_datetime inválido: '{slot_datetime}'. "
             f"Use o formato ISO retornado por check_availability: YYYY-MM-DDTHH:MM:SS"
+        )
+
+    # Valida que o slot é exatamente um dos retornados por check_availability —
+    # o modelo às vezes troca o mês/dia ao copiar o slot_iso de cabeça.
+    available_slots = run_context.session_state.get("available_slots")
+    if available_slots and slot_datetime not in available_slots:
+        raise RetryAgentRun(
+            f"ERRO: slot_datetime '{slot_datetime}' não é um dos horários retornados por check_availability. "
+            f"Use EXATAMENTE um destes valores: {', '.join(available_slots)}"
         )
 
     from zoneinfo import ZoneInfo
