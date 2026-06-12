@@ -37,9 +37,21 @@ async def check_availability(run_context: RunContext, date: str, duration_minute
             "Depois chame check_availability novamente."
         )
 
+    from datetime import datetime
+    from zoneinfo import ZoneInfo as _ZoneInfo
+
     try:
-        from datetime import datetime
         dt = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        hoje = datetime.now(_ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d")
+        raise RetryAgentRun(
+            f"O parâmetro date='{date}' está em formato inválido (use YYYY-MM-DD). "
+            f"A data de hoje é {hoje}. Chame check_availability novamente com date='{hoje}' "
+            f"(ou outra data válida no formato YYYY-MM-DD). NUNCA pergunte ao lead a data de hoje, "
+            f"você já sabe."
+        )
+
+    try:
         data_formatada = dt.strftime("%d/%m/%Y")
         dia_semana = ["Segunda-feira","Terça-feira","Quarta-feira","Quinta-feira","Sexta-feira","Sábado","Domingo"][dt.weekday()]
 
