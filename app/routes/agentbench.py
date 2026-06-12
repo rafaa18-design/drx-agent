@@ -443,6 +443,16 @@ async def execute_agent(
             conversation_id, 'assistant', response_text
         )
 
+        # Sincroniza com o CRM (lead + conversa + mensagens) — garante que
+        # toda conversa apareça no dashboard, mesmo sem chamadas de tool.
+        from app.services.crm_sync import sync_conversation_turn
+        await sync_conversation_turn(
+            conversation_id,
+            text_message,
+            response_text,
+            response.session_state or {},
+        )
+
         # Update session state from RunContext (tools may have modified it)
         if response.session_state:
             await update_session_state(
