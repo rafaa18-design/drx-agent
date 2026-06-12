@@ -89,6 +89,15 @@ async def qualify_lead(
     Returns:
         Score, nível, auto_meeting e ação recomendada.
     """
+    # Sinais vazios geram score 0 / desqualificado indevido — força o modelo a mapear
+    if not signals:
+        raise RetryAgentRun(
+            "A lista de signals está vazia. Mapeie o que o lead disse para os sinais da docstring "
+            "(ex: '90 mil seguidores' → followers_10k_to_100k; 'fonte de renda' → professional_use; "
+            "'marketing digital' → digital_marketing; restrição no print → temporary_restriction) "
+            "e chame qualify_lead novamente com eles."
+        )
+
     result = calculate_score(signals)
 
     run_context.session_state["qualification"] = {

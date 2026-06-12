@@ -71,9 +71,10 @@ class CalendarService:
                 from app.db.models import Appointment as ApptModel
                 from sqlalchemy import select as sa_select
 
-                # Usa UTC naive para comparação — compatível com como o Postgres armazena
-                day_start_utc = datetime.combine(target, time(0, 0), tzinfo=TIMEZONE).astimezone(_utc).replace(tzinfo=None)
-                day_end_utc   = datetime.combine(target, time(23, 59), tzinfo=TIMEZONE).astimezone(_utc).replace(tzinfo=None)
+                # Coluna scheduled_at é timezone-aware — compara aware com aware
+                # (naive vs aware quebra silenciosamente e deixa passar slot ocupado)
+                day_start_utc = datetime.combine(target, time(0, 0), tzinfo=TIMEZONE).astimezone(_utc)
+                day_end_utc   = datetime.combine(target, time(23, 59), tzinfo=TIMEZONE).astimezone(_utc)
 
                 async with AsyncSessionLocal() as db:
                     result = await db.execute(

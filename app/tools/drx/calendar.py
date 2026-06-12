@@ -12,10 +12,10 @@ _API = "http://localhost:8000"
 
 
 @tool
-async def check_availability(date: str, duration_minutes: int = 60) -> str:
+async def check_availability(run_context: RunContext, date: str, duration_minutes: int = 60) -> str:
     """Verifica horários disponíveis na agenda do advogado para uma data.
 
-    Use antes de propor horários ao cliente.
+    Use antes de propor horários ao cliente. Requer qualify_lead chamado antes.
 
     Args:
         date: Data no formato YYYY-MM-DD.
@@ -24,8 +24,18 @@ async def check_availability(date: str, duration_minutes: int = 60) -> str:
     Returns:
         Lista de horários disponíveis.
     """
-    # TODO: integrar com CalendarService (Google Calendar API)
     from app.services.calendar_service import CalendarService
+
+    # Gate: o lead PRECISA estar qualificado antes de oferecer horários.
+    # Garante que o score seja calculado e salvo no CRM em toda conversa.
+    if not run_context.session_state.get("qualification"):
+        raise RetryAgentRun(
+            "Antes de oferecer horários, chame qualify_lead com os sinais coletados na conversa. "
+            "Mapeie o que o lead disse para os sinais: seguidores (ex: 90 mil → followers_10k_to_100k), "
+            "uso profissional/fonte de renda → professional_use, marketing digital → digital_marketing, "
+            "restrição/banimento → temporary_restriction ou permanent_ban. "
+            "Depois chame check_availability novamente."
+        )
 
     try:
         from datetime import datetime
@@ -78,8 +88,13 @@ async def book_appointment(
     from datetime import datetime as _dt
 
     # Rejeita ano errado — o modelo às vezes constrói datas com ano defasado
+    from zoneinfo import ZoneInfo as _ZI
     try:
         _parsed = _dt.fromisoformat(slot_datetime)
+        # O slot vem como horário de Brasília — anexa o fuso para o Postgres
+        # não tratar como UTC (senão o dashboard mostra 3h a menos).
+        if _parsed.tzinfo is None:
+            _parsed = _parsed.replace(tzinfo=_ZI("America/Sao_Paulo"))
         _current_year = _dt.now().year
         if _parsed.year != _current_year:
             raise RetryAgentRun(
