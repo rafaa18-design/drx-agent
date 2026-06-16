@@ -98,6 +98,9 @@ async def qualify_lead(
             "e chame qualify_lead novamente com eles."
         )
 
+    LOW_FOLLOWER_SIGNALS = {"followers_below_5k", "followers_5k_to_10k"}
+    has_low_followers = bool(LOW_FOLLOWER_SIGNALS.intersection(signals))
+
     result = calculate_score(signals)
 
     run_context.session_state["qualification"] = {
@@ -159,6 +162,14 @@ async def qualify_lead(
     ]
     if result.events:
         lines.append("Sinais computados: " + ", ".join(e["signal"] for e in result.events))
+
+    if has_low_followers:
+        lines.append(
+            "BLOQUEIO DE REUNIÃO: lead tem menos de 10 mil seguidores. "
+            "NÃO ofereça nem agende reunião. "
+            "Siga a regra de lead com poucos seguidores do prompt."
+        )
+        run_context.session_state["meeting_blocked"] = True
 
     return "\n".join(lines)
 

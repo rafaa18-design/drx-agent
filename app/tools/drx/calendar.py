@@ -26,6 +26,14 @@ async def check_availability(run_context: RunContext, date: str, duration_minute
     """
     from app.services.calendar_service import CalendarService
 
+    # Gate: leads com menos de 10k seguidores não agendam reunião.
+    if run_context.session_state.get("meeting_blocked"):
+        raise RetryAgentRun(
+            "BLOQUEIO: este lead tem menos de 10 mil seguidores. "
+            "NÃO chame check_availability nem ofereça reunião. "
+            "Siga a regra de lead com poucos seguidores do prompt."
+        )
+
     # Gate: o lead PRECISA estar qualificado antes de oferecer horários.
     # Garante que o score seja calculado e salvo no CRM em toda conversa.
     if not run_context.session_state.get("qualification"):

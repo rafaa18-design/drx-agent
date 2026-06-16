@@ -29,8 +29,8 @@ SCORING_MATRIX = {
     "followers_300k_plus":        40,   # Nó 01 — reunião automática, mas score alto também
     "followers_100k_to_300k":     25,
     "followers_10k_to_100k":      10,
-    "followers_5k_to_10k":         0,
-    "followers_below_5k":        -20,
+    "followers_5k_to_10k":       -50,   # < 10k — não agenda reunião
+    "followers_below_5k":        -50,   # < 10k — não agenda reunião
 
     # --- Profissionalismo e monetização (Ponto 02, 05) ---
     "professional_bio_with_link": 15,   # bio tem link de produto/serviço
