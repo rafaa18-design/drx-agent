@@ -99,7 +99,9 @@ async def qualify_lead(
         )
 
     LOW_FOLLOWER_SIGNALS = {"followers_below_5k", "followers_5k_to_10k"}
+    HOBBY_SIGNALS = {"hobby_use"}
     has_low_followers = bool(LOW_FOLLOWER_SIGNALS.intersection(signals))
+    is_hobby = bool(HOBBY_SIGNALS.intersection(signals))
 
     result = calculate_score(signals)
 
@@ -168,6 +170,14 @@ async def qualify_lead(
             "BLOQUEIO DE REUNIÃO: lead tem menos de 10 mil seguidores. "
             "NÃO ofereça nem agende reunião. "
             "Siga a regra de lead com poucos seguidores do prompt."
+        )
+        run_context.session_state["meeting_blocked"] = True
+
+    if is_hobby and not has_low_followers:
+        lines.append(
+            "BLOQUEIO DE REUNIÃO: conta é pessoal/hobby, não profissional. "
+            "NÃO ofereça nem agende reunião. "
+            "Siga a regra de lead com conta pessoal do prompt."
         )
         run_context.session_state["meeting_blocked"] = True
 

@@ -40,7 +40,7 @@ SCORING_MATRIX = {
     "adult_content_monetized":    25,   # conteúdo adulto com monetização
     "monetization_history":       15,   # histórico comprovado de monetização
     "professional_use":           10,   # declarou uso profissional (Ponto 05)
-    "hobby_use":                 -20,   # declarou hobby (Ponto 05)
+    "hobby_use":                 -50,   # conta pessoal/hobby — não agenda reunião
 
     # --- Prejuízo financeiro (Ponto 06) ---
     "monthly_loss_above_5k":      20,   # prejuízo mensal acima de R$ 5.000
