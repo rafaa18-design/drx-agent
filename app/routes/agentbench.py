@@ -201,12 +201,12 @@ def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None) -> st
 
         response = model.generate_content([prompt, image_part])
         if response.text and response.text.strip():
-            logger.info('analyze_image_direct: ok (%d chars)', len(response.text))
+            logger.info('analyze_image_direct: ok (%d chars) → %s', len(response.text), response.text[:120])
             return response.text.strip()
-        logger.warning('analyze_image_direct: resposta vazia')
+        logger.warning('analyze_image_direct: resposta vazia (blocked? candidates=%s)', getattr(response, 'candidates', 'N/A'))
 
     except Exception as e:
-        logger.error('analyze_image_direct falhou: %s', str(e), exc_info=True)
+        logger.error('analyze_image_direct falhou: %s (type=%s, bytes=%d, mime=%s)', str(e), type(e).__name__, len(image_bytes), mime_type)
 
     return None
 
@@ -240,9 +240,17 @@ def parse_multimodal_input(
         elif item.type == 'image':
             mime = item.mime_type or 'image/jpeg'
             filename = item.filename or 'imagem'
+            raw = (item.content or '').strip()
 
-            # Suporta tanto base64 (chat web) quanto URL de mídia (WhatsApp/Evolution API)
-            raw = item.content.strip()
+            # Log para debug — mostra o formato recebido (primeiros 120 chars)
+            logger.info(
+                'IMAGE INPUT: len=%d, starts=%r, mime=%s, filename=%s',
+                len(raw), raw[:120], mime, filename,
+            )
+
+            content_bytes: bytes | None = None
+
+            # 1) URL de mídia (WhatsApp / Evolution API)
             if raw.startswith('http://') or raw.startswith('https://'):
                 try:
                     import httpx as _hx
@@ -254,14 +262,34 @@ def parse_multimodal_input(
                     logger.info('Imagem baixada de URL: %d bytes, mime=%s', len(content_bytes), mime)
                 except Exception as e:
                     logger.error('Falha ao baixar imagem de URL %s: %s', raw[:100], e)
-                    text_parts.append(
-                        f'[Print recebido: {filename}] '
-                        f'Não consegui baixar a imagem. '
-                        f'Informe o lead que recebeu e pergunte o que está escrito na tela.'
-                    )
-                    continue
-            else:
-                content_bytes = base64.b64decode(raw)
+
+            # 2) Data URI (data:image/png;base64,iVBOR...)
+            elif raw.startswith('data:'):
+                try:
+                    header, b64data = raw.split(',', 1)
+                    if 'image/' in header:
+                        mime = header.split(':')[1].split(';')[0]
+                    content_bytes = base64.b64decode(b64data)
+                    logger.info('Imagem decodificada de data URI: %d bytes', len(content_bytes))
+                except Exception as e:
+                    logger.error('Falha ao decodificar data URI: %s', e)
+
+            # 3) Base64 puro (chat web)
+            elif raw:
+                try:
+                    content_bytes = base64.b64decode(raw)
+                    logger.info('Imagem decodificada de base64: %d bytes', len(content_bytes))
+                except Exception as e:
+                    logger.error('Falha ao decodificar base64: %s (primeiros 80 chars: %r)', e, raw[:80])
+
+            if not content_bytes or len(content_bytes) < 100:
+                logger.warning('IMAGE: bytes vazios ou muito pequenos (%d), raw[:80]=%r', len(content_bytes or b''), raw[:80])
+                text_parts.append(
+                    f'[Print recebido: {filename}] '
+                    f'Não consegui processar a imagem. '
+                    f'Informe o lead que recebeu e pergunte o que está escrito na tela.'
+                )
+                continue
 
             # Guarda no cache para as vision tools atualizarem o CRM
             if conversation_id:
