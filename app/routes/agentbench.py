@@ -238,9 +238,30 @@ def parse_multimodal_input(
         if item.type == 'text':
             text_parts.append(item.content)
         elif item.type == 'image':
-            content_bytes = base64.b64decode(item.content)
             mime = item.mime_type or 'image/jpeg'
             filename = item.filename or 'imagem'
+
+            # Suporta tanto base64 (chat web) quanto URL de mídia (WhatsApp/Evolution API)
+            raw = item.content.strip()
+            if raw.startswith('http://') or raw.startswith('https://'):
+                try:
+                    import httpx as _hx
+                    r = _hx.get(raw, timeout=30, follow_redirects=True)
+                    r.raise_for_status()
+                    content_bytes = r.content
+                    if r.headers.get('content-type', '').startswith('image/'):
+                        mime = r.headers['content-type'].split(';')[0]
+                    logger.info('Imagem baixada de URL: %d bytes, mime=%s', len(content_bytes), mime)
+                except Exception as e:
+                    logger.error('Falha ao baixar imagem de URL %s: %s', raw[:100], e)
+                    text_parts.append(
+                        f'[Print recebido: {filename}] '
+                        f'Não consegui baixar a imagem. '
+                        f'Informe o lead que recebeu e pergunte o que está escrito na tela.'
+                    )
+                    continue
+            else:
+                content_bytes = base64.b64decode(raw)
 
             # Guarda no cache para as vision tools atualizarem o CRM
             if conversation_id:
