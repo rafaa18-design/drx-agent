@@ -1,6 +1,6 @@
 """Route sub-package: AgentBench, auth, prompts, system and DRX CRM endpoints."""
 
-from app.routes.agentbench import agentbench_router
+from app.routes.agentbench import agentbench_router, router_debug as debug_router
 from app.routes.appointments import router as appointments_router
 from app.routes.auth import auth_router
 from app.routes.conversations import router as conversations_router
@@ -12,6 +12,7 @@ from app.routes.webhooks import router as webhooks_router
 
 __all__ = [
     "agentbench_router",
+    "debug_router",
     "auth_router",
     "prompt_router",
     "system_router",

@@ -19,7 +19,7 @@ from starlette.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.middleware import JWTAuthMiddleware, RequestIDMiddleware, SecurityHeadersMiddleware
 from app.observability import get_langfuse, get_logger, setup_langfuse_env, setup_logging, setup_tracing, shutdown_langfuse, shutdown_tracing
-from app.routes import agentbench_router, auth_router, prompt_router, system_router
+from app.routes import agentbench_router, auth_router, debug_router, prompt_router, system_router
 from app.routes.crm import crm_router
 from app.storage import close_redis, get_redis
 
@@ -110,6 +110,7 @@ app = FastAPI(
 
 # --- Routers ---
 app.include_router(agentbench_router)
+app.include_router(debug_router)
 app.include_router(auth_router)
 app.include_router(prompt_router)
 app.include_router(system_router)

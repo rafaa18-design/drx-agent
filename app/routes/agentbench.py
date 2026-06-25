@@ -53,6 +53,18 @@ from app.tools import formatar_contexto_completo
 
 logger = get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Debug: último input de imagem recebido (para diagnosticar integração WhatsApp)
+# ---------------------------------------------------------------------------
+_last_image_debug: dict[str, Any] = {}
+
+router_debug = APIRouter(tags=["debug"])
+
+@router_debug.get("/debug/last-image-input")
+async def get_last_image_input():
+    """Retorna info do último input de imagem recebido (sem os bytes)."""
+    return _last_image_debug or {"status": "nenhuma imagem recebida ainda"}
+
 
 # ---------------------------------------------------------------------------
 # Phone Allowlist
@@ -242,11 +254,19 @@ def parse_multimodal_input(
             filename = item.filename or 'imagem'
             raw = (item.content or '').strip()
 
-            # Log para debug — mostra o formato recebido (primeiros 120 chars)
+            # Log + captura para debug — mostra o formato recebido
             logger.info(
                 'IMAGE INPUT: len=%d, starts=%r, mime=%s, filename=%s',
                 len(raw), raw[:120], mime, filename,
             )
+            _last_image_debug.update({
+                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                'content_length': len(raw),
+                'content_preview': raw[:200],
+                'mime_type': mime,
+                'filename': filename,
+                'conversation_id': conversation_id,
+            })
 
             content_bytes: bytes | None = None
 

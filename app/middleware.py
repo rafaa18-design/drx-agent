@@ -61,6 +61,7 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
         '/auth/login',
         '/auth/token',
         '/prompt/webhook',
+        '/debug/last-image-input',
     ]
 
     # Prefixos excluídos — rotas do CRM e WebSocket não exigem JWT do backend
