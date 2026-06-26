@@ -1,0 +1,48 @@
+name: Deploy IA to Cloud Run
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - ".github/workflows/keepalive.yml"
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: asani-drx
+  REGION: southamerica-east1
+  SERVICE: drx-advocacia-ia
+  WIF_PROVIDER: projects/256225317807/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+  DEPLOY_SA: github-deployer@asani-drx.iam.gserviceaccount.com
+
+# Cancela builds antigos do mesmo branch se um novo push chegar
+concurrency:
+  group: deploy-ia-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # necessário para o OIDC do Workload Identity Federation
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Autenticar no GCP (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy (build via Cloud Build a partir do Dockerfile)
+        run: |
+          gcloud run deploy "$SERVICE" \
+            --source . \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --quiet
