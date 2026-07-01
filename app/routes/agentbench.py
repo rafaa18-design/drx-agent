@@ -348,7 +348,18 @@ async def parse_multimodal_input(
             if conversation_id:
                 store_image(conversation_id, content_bytes, mime, filename)
 
-            # Analisa server-side — o agente recebe o resultado pronto
+            # Codifica UMA vez para reutilizar em analyze + media
+            b64_image = base64.b64encode(content_bytes).decode('utf-8')
+
+            # SEMPRE passa a imagem ao LLM principal via media — usa as mesmas
+            # credenciais que já funcionam para texto (gemini/gemini-2.5-flash).
+            # analyze_image_direct é usada como contexto extra quando disponível.
+            media.append({
+                'type': 'image_url',
+                'image_url': {'url': f'data:{mime};base64,{b64_image}'},
+            })
+
+            # Tenta pré-análise para contexto enriquecido
             analysis = await analyze_image_direct(content_bytes, mime)
 
             if analysis == '[IMAGEM_INVALIDA]':
@@ -364,10 +375,13 @@ async def parse_multimodal_input(
                     f'[Use analyze_problem_print ou analyze_profile_print para salvar no CRM]'
                 )
             else:
+                # Pré-análise falhou — o LLM principal verá a imagem diretamente via media
+                logger.warning('analyze_image_direct falhou — imagem passada direto ao agente via media')
                 text_parts.append(
-                    f'[Print recebido: {filename}] '
-                    f'Não consegui ler a imagem. '
-                    f'Informe o lead que recebeu e pergunte o que está escrito na tela.'
+                    f'[Print recebido do lead — {filename}]\n'
+                    f'Analise a imagem acima. Se for print de PROBLEMA (banimento, restrição, suspensão), '
+                    f'chame analyze_problem_print. Se for PERFIL, chame analyze_profile_print. '
+                    f'Responda ao lead em português.'
                 )
         elif item.type == 'audio':
             content_bytes = base64.b64decode(item.content)
