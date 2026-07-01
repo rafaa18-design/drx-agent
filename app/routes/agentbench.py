@@ -177,26 +177,16 @@ def transcribe_audio(audio_bytes: bytes, mime_type: str | None = None) -> str:
 
 
 async def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None) -> str | None:
-    """Analisa imagem via chamada HTTP direta à API REST do Gemini.
+    """Analisa imagem via Gemini REST. Tenta AI Studio key primeiro, depois Vertex AI via ADC.
 
-    Usa httpx direto — sem SDK, sem litellm — para máxima compatibilidade com
-    chaves AQ. (novo formato Google AI Studio) e AIza (formato antigo).
-    Retorna None em caso de falha total.
+    Compatível com Render (GEMINI_API_KEY) e Cloud Run (sem chave, usa ADC).
+    Retorna None em caso de falha total — caller decide o fallback.
     """
     import os
     import httpx
 
     mime = mime_type or 'image/jpeg'
-
-    gemini_key = (
-        os.environ.get('GEMINI_API_KEY')
-        or os.environ.get('GOOGLE_API_KEY')
-        or settings.GEMINI_API_KEY
-    )
-
-    if not gemini_key:
-        logger.error('analyze_image: nenhuma GEMINI_API_KEY ou GOOGLE_API_KEY encontrada no ambiente')
-        return None
+    b64_image = base64.b64encode(image_bytes).decode('utf-8')
 
     _PROMPT = (
         'Analise esta imagem e classifique-a em uma das categorias abaixo.\n\n'
@@ -219,34 +209,76 @@ async def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None)
         'Seja direto. Máximo 5 linhas para A e B. Apenas [IMAGEM_INVALIDA] para C.'
     )
 
-    b64_image = base64.b64encode(image_bytes).decode('utf-8')
     payload = {
-        'contents': [{
-            'parts': [
-                {'text': _PROMPT},
-                {'inline_data': {'mime_type': mime, 'data': b64_image}},
-            ]
-        }],
+        'contents': [{'parts': [
+            {'text': _PROMPT},
+            {'inline_data': {'mime_type': mime, 'data': b64_image}},
+        ]}],
         'generationConfig': {'maxOutputTokens': 512},
     }
 
-    url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}'
+    def _extract_text(data: dict) -> str | None:
+        try:
+            return data['candidates'][0]['content']['parts'][0]['text'].strip() or None
+        except (KeyError, IndexError):
+            return None
 
+    # --- Tentativa 1: AI Studio key (Render / desenvolvimento) ---
+    gemini_key = (
+        os.environ.get('GEMINI_API_KEY')
+        or os.environ.get('GOOGLE_API_KEY')
+        or settings.GEMINI_API_KEY
+    )
+    if gemini_key:
+        ai_url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}'
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(ai_url, json=payload)
+                logger.info('analyze_image [AI Studio]: status=%d key=%s…', r.status_code, gemini_key[:8])
+                r.raise_for_status()
+                text = _extract_text(r.json())
+                if text:
+                    logger.info('analyze_image [AI Studio]: ok → %s', text[:80])
+                    return text
+                logger.warning('analyze_image [AI Studio]: resposta vazia')
+        except httpx.HTTPStatusError as e:
+            logger.error('analyze_image [AI Studio] HTTP %d: %s', e.response.status_code, e.response.text[:200])
+        except Exception as e:
+            logger.error('analyze_image [AI Studio] falhou: %s', e)
+    else:
+        logger.info('analyze_image: GEMINI_API_KEY ausente — tentando Vertex AI ADC')
+
+    # --- Tentativa 2: Vertex AI via ADC (Cloud Run usa conta de serviço automaticamente) ---
     try:
+        from google.auth import default as _gauth_default
+        from google.auth.transport.requests import Request as _GAuthRequest
+
+        creds, gcp_project = _gauth_default(
+            scopes=['https://www.googleapis.com/auth/cloud-platform']
+        )
+        creds.refresh(_GAuthRequest())
+
+        region = os.environ.get('GOOGLE_CLOUD_REGION', 'southamerica-east1')
+        project_id = gcp_project or os.environ.get('GOOGLE_CLOUD_PROJECT', 'asani-drx')
+        vertex_url = (
+            f'https://{region}-aiplatform.googleapis.com/v1/projects/{project_id}'
+            f'/locations/{region}/publishers/google/models/gemini-2.5-flash:generateContent'
+        )
+
         async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(url, json=payload)
-            logger.info('analyze_image [REST]: status=%d, key_prefix=%s', r.status_code, gemini_key[:8])
+            r = await client.post(
+                vertex_url, json=payload,
+                headers={'Authorization': f'Bearer {creds.token}'},
+            )
+            logger.info('analyze_image [Vertex AI]: status=%d project=%s', r.status_code, project_id)
             r.raise_for_status()
-            data = r.json()
-            text = data['candidates'][0]['content']['parts'][0]['text']
-            if text and text.strip():
-                logger.info('analyze_image [REST]: ok (%d chars) → %s', len(text), text[:120])
-                return text.strip()
-            logger.warning('analyze_image [REST]: resposta vazia')
-    except httpx.HTTPStatusError as e:
-        logger.error('analyze_image [REST] HTTP error: status=%d body=%s', e.response.status_code, e.response.text[:300])
+            text = _extract_text(r.json())
+            if text:
+                logger.info('analyze_image [Vertex AI]: ok → %s', text[:80])
+                return text
+            logger.warning('analyze_image [Vertex AI]: resposta vazia')
     except Exception as e:
-        logger.error('analyze_image [REST] falhou: %s (type=%s)', str(e), type(e).__name__)
+        logger.error('analyze_image [Vertex AI] falhou: %s (type=%s)', str(e), type(e).__name__)
 
     return None
 
@@ -348,18 +380,7 @@ async def parse_multimodal_input(
             if conversation_id:
                 store_image(conversation_id, content_bytes, mime, filename)
 
-            # Codifica UMA vez para reutilizar em analyze + media
-            b64_image = base64.b64encode(content_bytes).decode('utf-8')
-
-            # SEMPRE passa a imagem ao LLM principal via media — usa as mesmas
-            # credenciais que já funcionam para texto (gemini/gemini-2.5-flash).
-            # analyze_image_direct é usada como contexto extra quando disponível.
-            media.append({
-                'type': 'image_url',
-                'image_url': {'url': f'data:{mime};base64,{b64_image}'},
-            })
-
-            # Tenta pré-análise para contexto enriquecido
+            # Analisa via Gemini REST (AI Studio key ou Vertex AI ADC para Cloud Run)
             analysis = await analyze_image_direct(content_bytes, mime)
 
             if analysis == '[IMAGEM_INVALIDA]':
@@ -375,13 +396,10 @@ async def parse_multimodal_input(
                     f'[Use analyze_problem_print ou analyze_profile_print para salvar no CRM]'
                 )
             else:
-                # Pré-análise falhou — o LLM principal verá a imagem diretamente via media
-                logger.warning('analyze_image_direct falhou — imagem passada direto ao agente via media')
                 text_parts.append(
-                    f'[Print recebido do lead — {filename}]\n'
-                    f'Analise a imagem acima. Se for print de PROBLEMA (banimento, restrição, suspensão), '
-                    f'chame analyze_problem_print. Se for PERFIL, chame analyze_profile_print. '
-                    f'Responda ao lead em português.'
+                    f'[Print recebido: {filename}] '
+                    f'Não consegui ler a imagem. '
+                    f'Informe o lead que recebeu e pergunte o que está escrito na tela.'
                 )
         elif item.type == 'audio':
             content_bytes = base64.b64decode(item.content)
