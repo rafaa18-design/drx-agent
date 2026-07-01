@@ -177,37 +177,41 @@ def transcribe_audio(audio_bytes: bytes, mime_type: str | None = None) -> str:
 
 
 async def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None) -> str | None:
-    """Analisa imagem via litellm (mesmo modelo/credenciais do agente) e retorna descrição estruturada.
+    """Analisa imagem retornando descrição estruturada. Tenta litellm, depois SDK direto do Google.
 
-    Retorna None em caso de falha — caller decide o fallback.
+    Retorna None em caso de falha total — caller decide o fallback.
     """
+    import os
+
+    mime = mime_type or 'image/jpeg'
+
+    _PROMPT = (
+        'Analise esta imagem e classifique-a em uma das categorias abaixo.\n\n'
+        'CATEGORIA A — Print de PROBLEMA em rede social:\n'
+        'Exemplos: tela de banimento, restrição, conta desativada, aviso, suspensão, bloqueio de funcionalidades.\n'
+        'Se for categoria A, retorne:\n'
+        '- Plataforma afetada (Instagram, TikTok, YouTube, etc.)\n'
+        '- Tipo do problema (banimento permanente, restrição temporária, aviso, etc.)\n'
+        '- Gravidade (permanente, temporário, apenas aviso)\n'
+        '- Texto principal visível na tela\n\n'
+        'CATEGORIA B — Print de PERFIL de rede social:\n'
+        'Exemplos: página de perfil com seguidores, bio, foto de capa.\n'
+        'Se for categoria B, retorne:\n'
+        '- Plataforma\n'
+        '- Nome/usuário\n'
+        '- Número de seguidores\n'
+        '- Sinais de monetização ou uso profissional\n\n'
+        'CATEGORIA C — Imagem NÃO relacionada (foto de pessoas, paisagens, documentos, etc.):\n'
+        'Retorne exatamente: [IMAGEM_INVALIDA]\n\n'
+        'Seja direto. Máximo 5 linhas para A e B. Apenas [IMAGEM_INVALIDA] para C.'
+    )
+
+    # --- Tentativa 1: litellm (mesmo modelo/credenciais do agente) ---
     try:
         import litellm
 
-        mime = mime_type or 'image/jpeg'
         b64_image = base64.b64encode(image_bytes).decode('utf-8')
         data_url = f'data:{mime};base64,{b64_image}'
-
-        prompt = (
-            'Analise esta imagem e classifique-a em uma das categorias abaixo.\n\n'
-            'CATEGORIA A — Print de PROBLEMA em rede social:\n'
-            'Exemplos: tela de banimento, restrição, conta desativada, aviso, suspensão, bloqueio de funcionalidades.\n'
-            'Se for categoria A, retorne:\n'
-            '- Plataforma afetada (Instagram, TikTok, YouTube, etc.)\n'
-            '- Tipo do problema (banimento permanente, restrição temporária, aviso, etc.)\n'
-            '- Gravidade (permanente, temporário, apenas aviso)\n'
-            '- Texto principal visível na tela\n\n'
-            'CATEGORIA B — Print de PERFIL de rede social:\n'
-            'Exemplos: página de perfil com seguidores, bio, foto de capa.\n'
-            'Se for categoria B, retorne:\n'
-            '- Plataforma\n'
-            '- Nome/usuário\n'
-            '- Número de seguidores\n'
-            '- Sinais de monetização ou uso profissional\n\n'
-            'CATEGORIA C — Imagem NÃO relacionada (foto de pessoas, paisagens, documentos, etc.):\n'
-            'Retorne exatamente: [IMAGEM_INVALIDA]\n\n'
-            'Seja direto. Máximo 5 linhas para A e B. Apenas [IMAGEM_INVALIDA] para C.'
-        )
 
         response = await litellm.acompletion(
             model=settings.DEFAULT_MODEL,
@@ -215,22 +219,44 @@ async def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None)
                 {
                     'role': 'user',
                     'content': [
-                        {'type': 'text', 'text': prompt},
+                        {'type': 'text', 'text': _PROMPT},
                         {'type': 'image_url', 'image_url': {'url': data_url}},
                     ],
                 }
             ],
             max_tokens=512,
         )
-
         text = response.choices[0].message.content
         if text and text.strip():
-            logger.info('analyze_image_direct: ok (%d chars) → %s', len(text), text[:120])
+            logger.info('analyze_image [litellm]: ok (%d chars) → %s', len(text), text[:120])
             return text.strip()
-        logger.warning('analyze_image_direct: resposta vazia do litellm')
-
+        logger.warning('analyze_image [litellm]: resposta vazia')
     except Exception as e:
-        logger.error('analyze_image_direct falhou: %s (type=%s, bytes=%d, mime=%s)', str(e), type(e).__name__, len(image_bytes), mime_type)
+        logger.error('analyze_image [litellm] falhou: %s | model=%s | bytes=%d | mime=%s',
+                     str(e), settings.DEFAULT_MODEL, len(image_bytes), mime)
+
+    # --- Tentativa 2: google.generativeai SDK com chave do env ---
+    gemini_key = (
+        os.environ.get('GEMINI_API_KEY')
+        or os.environ.get('GOOGLE_API_KEY')
+        or settings.GEMINI_API_KEY
+    )
+    if gemini_key:
+        try:
+            import google.generativeai as genai
+
+            genai.configure(api_key=gemini_key)
+            model = genai.GenerativeModel('gemini-2.5-flash')
+            image_part = {'mime_type': mime, 'data': image_bytes}
+            response = model.generate_content([_PROMPT, image_part])
+            if response.text and response.text.strip():
+                logger.info('analyze_image [genai SDK]: ok (%d chars) → %s', len(response.text), response.text[:120])
+                return response.text.strip()
+            logger.warning('analyze_image [genai SDK]: resposta vazia (candidates=%s)', getattr(response, 'candidates', 'N/A'))
+        except Exception as e:
+            logger.error('analyze_image [genai SDK] falhou: %s | bytes=%d | mime=%s', str(e), len(image_bytes), mime)
+    else:
+        logger.warning('analyze_image [genai SDK]: nenhuma GEMINI_API_KEY ou GOOGLE_API_KEY encontrada')
 
     return None
 
@@ -288,10 +314,15 @@ async def parse_multimodal_input(
                     import httpx as _hx
                     r = _hx.get(raw, timeout=30, follow_redirects=True)
                     r.raise_for_status()
-                    content_bytes = r.content
-                    if r.headers.get('content-type', '').startswith('image/'):
-                        mime = r.headers['content-type'].split(';')[0]
-                    logger.info('Imagem baixada de URL: %d bytes, mime=%s', len(content_bytes), mime)
+                    ct = r.headers.get('content-type', '')
+                    if ct and not ct.startswith('image/'):
+                        logger.error('URL retornou content-type inesperado: %s (URL=%s)', ct, raw[:80])
+                        content_bytes = None
+                    else:
+                        content_bytes = r.content
+                        if ct.startswith('image/'):
+                            mime = ct.split(';')[0]
+                        logger.info('Imagem baixada de URL: %d bytes, mime=%s', len(content_bytes), mime)
                 except Exception as e:
                     logger.error('Falha ao baixar imagem de URL %s: %s', raw[:100], e)
 
