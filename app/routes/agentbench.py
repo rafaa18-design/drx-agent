@@ -177,13 +177,26 @@ def transcribe_audio(audio_bytes: bytes, mime_type: str | None = None) -> str:
 
 
 async def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None) -> str | None:
-    """Analisa imagem retornando descrição estruturada. Tenta litellm, depois SDK direto do Google.
+    """Analisa imagem via chamada HTTP direta à API REST do Gemini.
 
-    Retorna None em caso de falha total — caller decide o fallback.
+    Usa httpx direto — sem SDK, sem litellm — para máxima compatibilidade com
+    chaves AQ. (novo formato Google AI Studio) e AIza (formato antigo).
+    Retorna None em caso de falha total.
     """
     import os
+    import httpx
 
     mime = mime_type or 'image/jpeg'
+
+    gemini_key = (
+        os.environ.get('GEMINI_API_KEY')
+        or os.environ.get('GOOGLE_API_KEY')
+        or settings.GEMINI_API_KEY
+    )
+
+    if not gemini_key:
+        logger.error('analyze_image: nenhuma GEMINI_API_KEY ou GOOGLE_API_KEY encontrada no ambiente')
+        return None
 
     _PROMPT = (
         'Analise esta imagem e classifique-a em uma das categorias abaixo.\n\n'
@@ -206,57 +219,34 @@ async def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None)
         'Seja direto. Máximo 5 linhas para A e B. Apenas [IMAGEM_INVALIDA] para C.'
     )
 
-    # --- Tentativa 1: litellm (mesmo modelo/credenciais do agente) ---
+    b64_image = base64.b64encode(image_bytes).decode('utf-8')
+    payload = {
+        'contents': [{
+            'parts': [
+                {'text': _PROMPT},
+                {'inline_data': {'mime_type': mime, 'data': b64_image}},
+            ]
+        }],
+        'generationConfig': {'maxOutputTokens': 512},
+    }
+
+    url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}'
+
     try:
-        import litellm
-
-        b64_image = base64.b64encode(image_bytes).decode('utf-8')
-        data_url = f'data:{mime};base64,{b64_image}'
-
-        response = await litellm.acompletion(
-            model=settings.DEFAULT_MODEL,
-            messages=[
-                {
-                    'role': 'user',
-                    'content': [
-                        {'type': 'text', 'text': _PROMPT},
-                        {'type': 'image_url', 'image_url': {'url': data_url}},
-                    ],
-                }
-            ],
-            max_tokens=512,
-        )
-        text = response.choices[0].message.content
-        if text and text.strip():
-            logger.info('analyze_image [litellm]: ok (%d chars) → %s', len(text), text[:120])
-            return text.strip()
-        logger.warning('analyze_image [litellm]: resposta vazia')
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(url, json=payload)
+            logger.info('analyze_image [REST]: status=%d, key_prefix=%s', r.status_code, gemini_key[:8])
+            r.raise_for_status()
+            data = r.json()
+            text = data['candidates'][0]['content']['parts'][0]['text']
+            if text and text.strip():
+                logger.info('analyze_image [REST]: ok (%d chars) → %s', len(text), text[:120])
+                return text.strip()
+            logger.warning('analyze_image [REST]: resposta vazia')
+    except httpx.HTTPStatusError as e:
+        logger.error('analyze_image [REST] HTTP error: status=%d body=%s', e.response.status_code, e.response.text[:300])
     except Exception as e:
-        logger.error('analyze_image [litellm] falhou: %s | model=%s | bytes=%d | mime=%s',
-                     str(e), settings.DEFAULT_MODEL, len(image_bytes), mime)
-
-    # --- Tentativa 2: google.generativeai SDK com chave do env ---
-    gemini_key = (
-        os.environ.get('GEMINI_API_KEY')
-        or os.environ.get('GOOGLE_API_KEY')
-        or settings.GEMINI_API_KEY
-    )
-    if gemini_key:
-        try:
-            import google.generativeai as genai
-
-            genai.configure(api_key=gemini_key)
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            image_part = {'mime_type': mime, 'data': image_bytes}
-            response = model.generate_content([_PROMPT, image_part])
-            if response.text and response.text.strip():
-                logger.info('analyze_image [genai SDK]: ok (%d chars) → %s', len(response.text), response.text[:120])
-                return response.text.strip()
-            logger.warning('analyze_image [genai SDK]: resposta vazia (candidates=%s)', getattr(response, 'candidates', 'N/A'))
-        except Exception as e:
-            logger.error('analyze_image [genai SDK] falhou: %s | bytes=%d | mime=%s', str(e), len(image_bytes), mime)
-    else:
-        logger.warning('analyze_image [genai SDK]: nenhuma GEMINI_API_KEY ou GOOGLE_API_KEY encontrada')
+        logger.error('analyze_image [REST] falhou: %s (type=%s)', str(e), type(e).__name__)
 
     return None
 
