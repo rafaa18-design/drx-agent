@@ -176,19 +176,17 @@ def transcribe_audio(audio_bytes: bytes, mime_type: str | None = None) -> str:
     return '[audio não transcrito]'
 
 
-def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None) -> str | None:
-    """Analisa imagem com Gemini Flash e retorna descrição estruturada para o agente.
+async def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None) -> str | None:
+    """Analisa imagem via litellm (mesmo modelo/credenciais do agente) e retorna descrição estruturada.
 
     Retorna None em caso de falha — caller decide o fallback.
     """
     try:
-        import google.generativeai as genai
-
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        import litellm
 
         mime = mime_type or 'image/jpeg'
-        image_part = {'mime_type': mime, 'data': image_bytes}
+        b64_image = base64.b64encode(image_bytes).decode('utf-8')
+        data_url = f'data:{mime};base64,{b64_image}'
 
         prompt = (
             'Analise esta imagem e classifique-a em uma das categorias abaixo.\n\n'
@@ -211,11 +209,25 @@ def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None) -> st
             'Seja direto. Máximo 5 linhas para A e B. Apenas [IMAGEM_INVALIDA] para C.'
         )
 
-        response = model.generate_content([prompt, image_part])
-        if response.text and response.text.strip():
-            logger.info('analyze_image_direct: ok (%d chars) → %s', len(response.text), response.text[:120])
-            return response.text.strip()
-        logger.warning('analyze_image_direct: resposta vazia (blocked? candidates=%s)', getattr(response, 'candidates', 'N/A'))
+        response = await litellm.acompletion(
+            model=settings.DEFAULT_MODEL,
+            messages=[
+                {
+                    'role': 'user',
+                    'content': [
+                        {'type': 'text', 'text': prompt},
+                        {'type': 'image_url', 'image_url': {'url': data_url}},
+                    ],
+                }
+            ],
+            max_tokens=512,
+        )
+
+        text = response.choices[0].message.content
+        if text and text.strip():
+            logger.info('analyze_image_direct: ok (%d chars) → %s', len(text), text[:120])
+            return text.strip()
+        logger.warning('analyze_image_direct: resposta vazia do litellm')
 
     except Exception as e:
         logger.error('analyze_image_direct falhou: %s (type=%s, bytes=%d, mime=%s)', str(e), type(e).__name__, len(image_bytes), mime_type)
@@ -223,7 +235,7 @@ def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None) -> st
     return None
 
 
-def parse_multimodal_input(
+async def parse_multimodal_input(
     items: list[InputItem],
     model: str = '',
     conversation_id: str = '',
@@ -316,7 +328,7 @@ def parse_multimodal_input(
                 store_image(conversation_id, content_bytes, mime, filename)
 
             # Analisa server-side — o agente recebe o resultado pronto
-            analysis = analyze_image_direct(content_bytes, mime)
+            analysis = await analyze_image_direct(content_bytes, mime)
 
             if analysis == '[IMAGEM_INVALIDA]':
                 text_parts.append(
@@ -440,7 +452,7 @@ async def execute_agent(
     try:
         # Parse multimodal input (passa conversation_id para indexar imagens no cache)
         model = get_litellm_model(model_id)
-        text_message, images = parse_multimodal_input(
+        text_message, images = await parse_multimodal_input(
             request.input, model=model, conversation_id=conversation_id
         )
 
