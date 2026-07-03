@@ -210,7 +210,10 @@ async def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None)
     )
 
     payload = {
-        'contents': [{'parts': [
+        # 'role' é obrigatório no Vertex AI (generateContent responde
+        # 400 "Please use a valid role: user, model." sem ele). O AI Studio
+        # aceita o mesmo payload, então serve para os dois backends.
+        'contents': [{'role': 'user', 'parts': [
             {'text': _PROMPT},
             {'inline_data': {'mime_type': mime, 'data': b64_image}},
         ]}],
@@ -277,6 +280,8 @@ async def analyze_image_direct(image_bytes: bytes, mime_type: str | None = None)
                 logger.info('analyze_image [Vertex AI]: ok → %s', text[:80])
                 return text
             logger.warning('analyze_image [Vertex AI]: resposta vazia')
+    except httpx.HTTPStatusError as e:
+        logger.error('analyze_image [Vertex AI] HTTP %d: %s', e.response.status_code, e.response.text[:300])
     except Exception as e:
         logger.error('analyze_image [Vertex AI] falhou: %s (type=%s)', str(e), type(e).__name__)
 
