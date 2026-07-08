@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Conversation, Message
+from app.db.models import Conversation, Lead, Message
 from app.db.session import get_db
 
 router = APIRouter(prefix="/api/conversations", tags=["CRM · Conversas"])
@@ -18,6 +18,8 @@ router = APIRouter(prefix="/api/conversations", tags=["CRM · Conversas"])
 class ConversationOut(BaseModel):
     id: str
     lead_id: str
+    lead_name: str | None
+    lead_phone: str | None
     channel: str
     status: str
     ai_handoff_reason: str | None
@@ -47,10 +49,12 @@ class MessageOut(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-def conv_to_dict(c: Conversation) -> dict:
+def conv_to_dict(c: Conversation, lead: Lead | None = None) -> dict:
     return {
         "id": c.id,
         "lead_id": c.lead_id,
+        "lead_name": lead.name if lead else None,
+        "lead_phone": lead.phone if lead else None,
         "channel": c.channel,
         "status": c.status,
         "ai_handoff_reason": c.ai_handoff_reason,
@@ -84,7 +88,13 @@ async def list_conversations(
     db: AsyncSession = Depends(get_db),
 ):
     """Lista conversas — filtro por status permite isolar fila de atendimento humano."""
-    q = select(Conversation).order_by(Conversation.last_message_at.desc())
+    from sqlalchemy.orm import joinedload
+
+    q = (
+        select(Conversation)
+        .options(joinedload(Conversation.lead))
+        .order_by(Conversation.last_message_at.desc())
+    )
 
     if status:
         q = q.where(Conversation.status == status)
@@ -93,9 +103,9 @@ async def list_conversations(
 
     total = (await db.execute(select(func.count()).select_from(q.subquery()))).scalar_one()
     result = await db.execute(q.limit(limit).offset(offset))
-    convs = result.scalars().all()
+    convs = result.scalars().unique().all()
 
-    return {"items": [conv_to_dict(c) for c in convs], "total": total}
+    return {"items": [conv_to_dict(c, c.lead) for c in convs], "total": total}
 
 
 @router.get("/{conv_id}")
@@ -103,7 +113,8 @@ async def get_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
     conv = await db.get(Conversation, conv_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversa não encontrada")
-    return conv_to_dict(conv)
+    lead = await db.get(Lead, conv.lead_id)
+    return conv_to_dict(conv, lead)
 
 
 @router.get("/{conv_id}/messages")
