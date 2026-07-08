@@ -1,4 +1,4 @@
-"""Google Calendar API — service account com domain-wide delegation.
+"""Google Calendar API — OAuth 2.0 por advogado (cada um conecta a própria conta).
 
 Em desenvolvimento: defina MOCK_SERVICES=true no .env para retornar dados falsos
 sem precisar de credenciais Google.
@@ -24,21 +24,37 @@ _MOCK = os.environ.get("MOCK_SERVICES", "false").lower() == "true"
 
 
 class CalendarService:
-    """Cliente Google Calendar usando service account."""
+    """Cliente Google Calendar — credenciais OAuth de um advogado específico."""
 
-    def __init__(self) -> None:
+    def __init__(self, lawyer=None) -> None:
+        """`lawyer` é uma instância de app.db.models.Lawyer. Pode ser None só em
+        modo mock (nenhuma chamada real é feita nesse caso)."""
+        self._lawyer = lawyer
         self._service = None  # lazy init
 
     def _build_service(self) -> Any:
-        """Constrói o cliente autenticado via service account."""
-        from google.oauth2 import service_account
+        """Constrói o cliente autenticado com o refresh token do advogado."""
+        from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
 
-        credentials = service_account.Credentials.from_service_account_file(
-            os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"],
-            scopes=["https://www.googleapis.com/auth/calendar"],
-        ).with_subject(os.environ["GOOGLE_CALENDAR_SUBJECT_EMAIL"])
+        from app.services.google_oauth_service import SCOPES, decrypt_refresh_token
 
+        if self._lawyer is None or not self._lawyer.google_refresh_token_encrypted:
+            raise RuntimeError(
+                "Advogado ainda não conectou o Google Calendar (veja /settings no CRM)."
+            )
+
+        refresh_token = decrypt_refresh_token(self._lawyer.google_refresh_token_encrypted)
+        credentials = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            client_id=os.environ["GOOGLE_OAUTH_CLIENT_ID"],
+            client_secret=os.environ["GOOGLE_OAUTH_CLIENT_SECRET"],
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=SCOPES,
+        )
+        # google-auth renova o access token sozinho a partir do refresh_token —
+        # não precisamos guardar/gerenciar expiração manualmente.
         return build("calendar", "v3", credentials=credentials)
 
     @property
@@ -104,7 +120,7 @@ class CalendarService:
 
         """Retorna lista de horários disponíveis (HH:MM) para a data."""
         target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        calendar_id = os.environ.get("LAWYER_CALENDAR_ID", "primary")
+        calendar_id = self._lawyer.calendar_id if self._lawyer else "primary"
 
         time_min = datetime.combine(target_date, BUSINESS_START, tzinfo=TIMEZONE).isoformat()
         time_max = datetime.combine(target_date, BUSINESS_END, tzinfo=TIMEZONE).isoformat()
@@ -138,11 +154,22 @@ class CalendarService:
         lead_id: str,
         slot_datetime: str,
         client_name: str,
+        channel: str = "meet",
         client_email: str = "",
         appointment_type: str = "initial_consultation",
     ) -> dict:
+        """Cria evento no calendário do advogado.
+
+        - Sempre cria o evento (marca o horário na agenda), nos dois canais.
+        - `channel == "meet"`: inclui link de Google Meet e, se `client_email`
+          foi informado, adiciona o cliente como attendee — o próprio Google
+          manda o convite por e-mail ao cliente (sem precisar de nenhum
+          serviço de e-mail externo).
+        - `channel == "whatsapp"`: evento simples, sem Meet, sem attendees,
+          sem nenhum e-mail — a reunião acontece dentro do próprio WhatsApp.
+        """
         if _MOCK:
-            logger.info("[MOCK] create_appointment(lead=%s, slot=%s)", lead_id, slot_datetime)
+            logger.info("[MOCK] create_appointment(lead=%s, slot=%s, channel=%s)", lead_id, slot_datetime, channel)
             try:
                 dt = datetime.fromisoformat(slot_datetime).replace(tzinfo=TIMEZONE)
                 formatted = dt.strftime("%d/%m/%Y às %H:%M")
@@ -150,57 +177,50 @@ class CalendarService:
                 formatted = slot_datetime
             return {
                 "event_id": f"mock-event-{lead_id}",
-                "meet_link": "https://meet.google.com/mock-drx-test",
+                "meet_link": "https://meet.google.com/mock-drx-test" if channel == "meet" else "",
                 "formatted_datetime": formatted,
             }
 
-        """Cria evento no Google Calendar e retorna dados do evento."""
         import uuid
 
-        calendar_id = os.environ.get("LAWYER_CALENDAR_ID", "primary")
-        lawyer_email = os.environ["GOOGLE_CALENDAR_SUBJECT_EMAIL"]
+        calendar_id = self._lawyer.calendar_id if self._lawyer else "primary"
         duration = int(os.environ.get("APPOINTMENT_DURATION_MINUTES", "60"))
 
         start_dt = datetime.fromisoformat(slot_datetime).replace(tzinfo=TIMEZONE)
         end_dt = start_dt + timedelta(minutes=duration)
 
-        attendees = [{"email": lawyer_email}]
-        if client_email:
-            attendees.append({"email": client_email})
-
         event_body: dict = {
             "summary": f"Consulta — {client_name}",
-            "description": f"Lead ID: {lead_id} | Tipo: {appointment_type}",
+            "description": f"Lead ID: {lead_id} | Tipo: {appointment_type} | Canal: {channel}",
             "start": {"dateTime": start_dt.isoformat(), "timeZone": "America/Sao_Paulo"},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": "America/Sao_Paulo"},
-            "attendees": attendees,
-            "conferenceData": {
+        }
+
+        is_meet = channel == "meet"
+        if is_meet:
+            event_body["conferenceData"] = {
                 "createRequest": {
                     "requestId": str(uuid.uuid4()),
                     "conferenceSolutionKey": {"type": "hangoutsMeet"},
                 }
-            },
-            "reminders": {
-                "useDefault": False,
-                "overrides": [
-                    {"method": "email", "minutes": 1440},
-                    {"method": "popup", "minutes": 60},
-                ],
-            },
-        }
+            }
+        if is_meet and client_email:
+            event_body["attendees"] = [{"email": client_email}]
 
         created = self.service.events().insert(
             calendarId=calendar_id,
             body=event_body,
-            conferenceDataVersion=1,
-            sendUpdates="all",
+            conferenceDataVersion=1 if is_meet else 0,
+            sendUpdates="all" if (is_meet and client_email) else "none",
         ).execute()
 
-        meet_link = (
-            created.get("conferenceData", {})
-            .get("entryPoints", [{}])[0]
-            .get("uri", "")
-        )
+        meet_link = ""
+        if is_meet:
+            meet_link = (
+                created.get("conferenceData", {})
+                .get("entryPoints", [{}])[0]
+                .get("uri", "")
+            )
 
         return {
             "event_id": created["id"],

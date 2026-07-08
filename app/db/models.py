@@ -113,6 +113,35 @@ class Message(Base):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Lawyer
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Lawyer(Base):
+    """Advogado do escritório — dono de uma agenda Google conectada via OAuth."""
+    __tablename__ = "lawyers"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    email: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    username: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    # username deve casar com uma chave de AUTH_USERS — é assim que o login do CRM
+    # resolve "qual advogado sou eu" ao clicar em "Conectar Google Calendar".
+
+    calendar_id: Mapped[str] = mapped_column(String(200), default="primary")
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Advogado usado pelo Tiago quando agenda pelo WhatsApp (sem atribuição manual ainda).
+
+    google_refresh_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    google_account_email: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    google_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, server_default=func.now())
+
+    appointments: Mapped[list["Appointment"]] = relationship("Appointment", back_populates="lawyer")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Appointment
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -122,7 +151,7 @@ class Appointment(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     lead_id: Mapped[str] = mapped_column(String(36), ForeignKey("leads.id", ondelete="CASCADE"), nullable=False, index=True)
-    lawyer_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    lawyer_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("lawyers.id", ondelete="SET NULL"), nullable=True, index=True)
     google_event_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     google_meet_link: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
@@ -136,3 +165,4 @@ class Appointment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
 
     lead: Mapped["Lead"] = relationship("Lead", back_populates="appointments")
+    lawyer: Mapped["Lawyer | None"] = relationship("Lawyer", back_populates="appointments")

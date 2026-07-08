@@ -43,6 +43,7 @@ from app.tools.drx import (
     escalate_to_human,
     get_lead_context,
     qualify_lead,
+    save_client_email,
     send_whatsapp_message,
     update_lead_status,
 )
@@ -129,6 +130,7 @@ def get_tools_registry() -> ToolRegistry:
         # DRX · Agendamento
         check_availability,
         book_appointment,
+        save_client_email,
         # DRX · WhatsApp e escalação
         send_whatsapp_message,
         escalate_to_human,

@@ -1,14 +1,40 @@
 """Tools de agenda Google Calendar para DRX."""
 
 import logging
-
-import httpx
+import re
 
 from app.runtime import RetryAgentRun, RunContext, tool
 
 logger = logging.getLogger(__name__)
 
-_API = "http://localhost:8000"
+
+async def _get_default_lawyer(db):
+    """Advogado usado pelo Tiago ao agendar via WhatsApp (ainda sem atribuição
+    manual por lead — todo agendamento cai no advogado marcado como padrão)."""
+    from sqlalchemy import select as sa_select
+    from app.db.models import Lawyer as LawyerModel
+
+    result = await db.execute(sa_select(LawyerModel).where(LawyerModel.is_default.is_(True)))
+    return result.scalar_one_or_none()
+
+
+@tool
+def save_client_email(run_context: RunContext, email: str) -> str:
+    """Salva o e-mail do cliente — necessário antes de confirmar reunião por Google Meet.
+
+    Só chame quando o cliente escolher reunião por vídeo (Meet). Reunião só por
+    WhatsApp não precisa de e-mail.
+
+    Args:
+        email: E-mail informado pelo cliente.
+
+    Returns:
+        Confirmação para prosseguir com book_appointment.
+    """
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email.strip()):
+        raise RetryAgentRun(f"'{email}' não parece um e-mail válido. Peça o e-mail novamente ao cliente.")
+    run_context.session_state["client_email"] = email.strip()
+    return f"E-mail {email.strip()} salvo. Pode prosseguir com book_appointment(channel='meet', ...)."
 
 
 @tool
@@ -63,7 +89,11 @@ async def check_availability(run_context: RunContext, date: str, duration_minute
         data_formatada = dt.strftime("%d/%m/%Y")
         dia_semana = ["Segunda-feira","Terça-feira","Quarta-feira","Quinta-feira","Sexta-feira","Sábado","Domingo"][dt.weekday()]
 
-        service = CalendarService()
+        from app.db.session import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            lawyer = await _get_default_lawyer(db)
+
+        service = CalendarService(lawyer=lawyer)
         slots = await service.get_available_slots(date, duration_minutes)
         if not slots:
             return f"Nenhum horário disponível em {dia_semana}, {data_formatada}. Sugira outra data."
@@ -110,6 +140,14 @@ async def book_appointment(
     """
     import os
     from datetime import datetime as _dt
+
+    # Reunião por vídeo precisa do e-mail do cliente ANTES de confirmar — é
+    # esse e-mail que o Google usa para mandar o convite com o link do Meet.
+    if channel == "meet" and not run_context.session_state.get("client_email"):
+        raise RetryAgentRun(
+            "Antes de confirmar reunião por Google Meet, pergunte o e-mail do cliente "
+            "e chame save_client_email. Depois tente book_appointment novamente."
+        )
 
     # Rejeita ano errado — o modelo às vezes constrói datas com ano defasado
     from zoneinfo import ZoneInfo as _ZI
@@ -196,8 +234,11 @@ async def book_appointment(
 
             run_context.session_state["db_lead_id"] = lead.id
 
+            lawyer = await _get_default_lawyer(db)
+
             appt = ApptModel(
                 lead_id=lead.id,
+                lawyer_id=lawyer.id if lawyer else None,
                 scheduled_at=_parsed,
                 duration_minutes=duration,
                 appointment_type=appointment_type,
@@ -205,23 +246,25 @@ async def book_appointment(
                 status="scheduled",
             )
 
-            # Cria evento no Google Calendar (mock em dev) quando for Meet
+            # Sempre cria o evento no calendário do advogado (nos dois canais) —
+            # só o link de Meet/e-mail ao cliente depende de channel=="meet".
             meet_link = None
-            if channel != "whatsapp":
-                try:
-                    from app.services.calendar_service import CalendarService
-                    service = CalendarService()
-                    result = await service.create_appointment(
-                        lead_id=lead.id,
-                        slot_datetime=_parsed.isoformat(),
-                        client_name=lead.name or lead.phone,
-                        appointment_type=appointment_type,
-                    )
-                    appt.google_event_id = result.get("event_id")
-                    appt.google_meet_link = result.get("meet_link")
-                    meet_link = result.get("meet_link")
-                except Exception as e:
-                    logger.warning("Falha ao criar evento no Calendar: %s", e)
+            try:
+                from app.services.calendar_service import CalendarService
+                service = CalendarService(lawyer=lawyer)
+                result = await service.create_appointment(
+                    lead_id=lead.id,
+                    slot_datetime=_parsed.isoformat(),
+                    client_name=lead.name or lead.phone,
+                    channel=channel,
+                    client_email=run_context.session_state.get("client_email", "") if channel == "meet" else "",
+                    appointment_type=appointment_type,
+                )
+                appt.google_event_id = result.get("event_id")
+                appt.google_meet_link = result.get("meet_link") or None
+                meet_link = result.get("meet_link")
+            except Exception as e:
+                logger.warning("Falha ao criar evento no Calendar: %s", e)
 
             db.add(appt)
             lead.commercial_status = "proposal"

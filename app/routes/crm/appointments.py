@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Appointment, Lead
+from app.db.models import Appointment, Lawyer, Lead
 from app.db.session import get_db
 from app.services.calendar_service import CalendarService
 
@@ -39,6 +39,7 @@ class AppointmentCreate(BaseModel):
     appointment_type: str = "initial_consultation"
     channel: str = "meet"
     lawyer_id: str | None = None
+    client_email: str | None = None
     notes: str | None = None
     google_event_id: str | None = None
     google_meet_link: str | None = None
@@ -107,14 +108,24 @@ async def list_appointments(
     return {"items": [appt_to_dict(a, a.lead) for a in appts], "total": total}
 
 
+async def _resolve_lawyer(db: AsyncSession, lawyer_id: str | None) -> Lawyer | None:
+    if lawyer_id:
+        return await db.get(Lawyer, lawyer_id)
+    result = await db.execute(select(Lawyer).where(Lawyer.is_default.is_(True)))
+    return result.scalar_one_or_none()
+
+
 @router.get("/calendar/availability")
 async def get_availability(
     date: str = Query(..., description="Data no formato YYYY-MM-DD"),
     duration: int = Query(60),
+    lawyer_id: str | None = Query(None, description="Se omitido, usa o advogado padrão"),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Consulta horários disponíveis no Google Calendar (ou mock em dev)."""
+    """Consulta horários disponíveis no Google Calendar do advogado (ou mock em dev)."""
     try:
-        service = CalendarService()
+        lawyer = await _resolve_lawyer(db, lawyer_id)
+        service = CalendarService(lawyer=lawyer)
         slots = await service.get_available_slots(date, duration)
         return {"available_slots": slots, "date": date, "duration_minutes": duration}
     except Exception as e:
@@ -131,33 +142,40 @@ async def get_appointment(appt_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.post("", status_code=201)
 async def create_appointment(body: AppointmentCreate, db: AsyncSession = Depends(get_db)):
-    """Cria agendamento e tenta criar evento no Google Calendar."""
+    """Cria agendamento e tenta criar evento no Google Calendar do advogado."""
     lead = await db.get(Lead, body.lead_id)
     if not lead:
         raise HTTPException(status_code=404, detail="Lead não encontrado")
+
+    lawyer = await _resolve_lawyer(db, body.lawyer_id)
 
     appt = Appointment(
         lead_id=body.lead_id,
         scheduled_at=body.scheduled_at,
         duration_minutes=body.duration_minutes,
         appointment_type=body.appointment_type,
-        lawyer_id=body.lawyer_id,
+        lawyer_id=lawyer.id if lawyer else None,
         notes=body.notes,
         status="scheduled",
     )
 
-    # Cria evento no Google Calendar apenas quando o canal for Meet
-    if body.channel != "whatsapp":
+    # Sempre tenta criar o evento no calendário do advogado (nos dois canais) —
+    # sem advogado resolvido, não há de quem calendário usar, então pula.
+    calendar_event_created = False
+    if lawyer:
         try:
-            service = CalendarService()
+            service = CalendarService(lawyer=lawyer)
             result = await service.create_appointment(
                 lead_id=body.lead_id,
                 slot_datetime=body.scheduled_at.isoformat(),
                 client_name=lead.name or lead.phone,
+                channel=body.channel,
+                client_email=(body.client_email or "") if body.channel == "meet" else "",
                 appointment_type=body.appointment_type or "initial_consultation",
             )
             appt.google_event_id = result.get("event_id")
-            appt.google_meet_link = result.get("meet_link")
+            appt.google_meet_link = result.get("meet_link") or None
+            calendar_event_created = True
         except Exception:
             pass  # Falha silenciosa — agendamento salvo sem Calendar
 
@@ -168,7 +186,7 @@ async def create_appointment(body: AppointmentCreate, db: AsyncSession = Depends
     lead.commercial_status = "proposal"
     lead.updated_at = datetime.now(timezone.utc)
 
-    return appt_to_dict(appt)
+    return {**appt_to_dict(appt), "calendar_event_created": calendar_event_created}
 
 
 @router.patch("/{appt_id}")

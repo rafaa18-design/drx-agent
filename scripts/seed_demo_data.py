@@ -24,6 +24,7 @@ Uso:
 
 import argparse
 import os
+import random
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -246,6 +247,99 @@ def seed(session: Session) -> None:
     print(f"{len(LEADS)} leads de exemplo criados (assigned_to='{SEED_MARKER}').")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 48 leads históricos adicionais — dão densidade aos gráficos do dashboard
+# (mesma geração determinística usada em scripts/mock_dashboard_server.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_HIST_FIRST = [
+    "Ana", "Bruno", "Carla", "Diego", "Elisa", "Felipe", "Gabriela", "Heitor",
+    "Isabela", "Jonas", "Karina", "Leandro", "Mariana", "Nathan", "Otávio",
+    "Priscila", "Renata", "Samuel", "Tainá", "Vitor", "Yasmin", "Bárbara",
+    "Caio", "Débora",
+]
+_HIST_LAST = [
+    "Almeida", "Barbosa", "Cardoso", "Diniz", "Esteves", "Fonseca",
+    "Guimarães", "Junqueira", "Lacerda", "Moreira", "Nunes", "Oliveira",
+    "Pires", "Queiroz", "Ramos", "Sales", "Teixeira", "Uchoa", "Vasconcelos",
+    "Werneck",
+]
+_HIST_PLATFORMS = ["instagram"] * 4 + ["tiktok"] * 3 + ["youtube"] * 2 + ["facebook"] * 1
+_HIST_CASES = ["permanent_ban", "temporary_restriction", "warning_only"]
+_HIST_LEVELS = [
+    ("auto_meeting", (95, 100), 1),
+    ("hot", (60, 90), 3),
+    ("warm", (35, 55), 4),
+    ("cold", (5, 25), 3),
+    ("disqualified", (-50, -10), 2),
+]
+_HIST_HOURS = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+_HIST_HOUR_W = [2, 5, 6, 6, 4, 3, 4, 4, 4, 4, 5, 7, 8, 6, 3]
+
+_rng = random.Random(42)
+
+
+def _hist_status(level: str, age_days: int) -> str:
+    """Destino no funil coerente com o nível e a idade do lead."""
+    if level == "disqualified":
+        return "lost"
+    if age_days >= 10:
+        if level in ("auto_meeting", "hot"):
+            return _rng.choice(["won", "won", "follow_up", "lost"])
+        return _rng.choice(["lost", "lost", "follow_up", "won"])
+    if age_days >= 5:
+        return _rng.choice(["qualified", "proposal", "contacted", "follow_up"])
+    return _rng.choice(["new", "contacted", "contacted", "qualified"])
+
+
+def seed_historical(session: Session) -> None:
+    """48 leads históricos (30 dias, horários variados) — sem conversa/agendamento,
+    só para dar volume/distribuição realista aos gráficos do dashboard."""
+    hist_names: set[str] = set()
+    count = 0
+    for j in range(48):
+        while True:
+            name = f"{_rng.choice(_HIST_FIRST)} {_rng.choice(_HIST_LAST)}"
+            if name not in hist_names:
+                hist_names.add(name)
+                break
+
+        level, (lo, hi), _w = _rng.choices(_HIST_LEVELS, weights=[w for *_, w in _HIST_LEVELS])[0]
+        age = _rng.randint(0, 29)
+        created = (now - timedelta(days=age)).replace(
+            hour=_rng.choices(_HIST_HOURS, weights=_HIST_HOUR_W)[0],
+            minute=_rng.randint(0, 59),
+        )
+        if created.weekday() >= 5 and _rng.random() < 0.6:
+            created -= timedelta(days=2)
+        if created > now:
+            created -= timedelta(days=1)
+        updated = min(created + timedelta(hours=_rng.randint(2, 72)), now)
+
+        session.add(Lead(
+            phone=f"{PHONE_PREFIX}{j + 13:03d}",
+            name=name,
+            email=None,
+            platform=_rng.choice(_HIST_PLATFORMS),
+            case_type=_rng.choice(_HIST_CASES),
+            case_description="Lead histórico de demonstração.",
+            monthly_loss_estimate=None,
+            qualification_score=_rng.randint(lo, hi),
+            qualification_level=level,
+            qualification_signals={"signals": []},
+            commercial_status=_hist_status(level, age),
+            source=_rng.choice(["ad", "ad", "referral", "unknown"]),
+            assigned_to=SEED_MARKER,
+            ai_active=True,
+            created_at=created,
+            updated_at=updated,
+        ))
+        count += 1
+
+    session.commit()
+    print(f"{count} leads históricos adicionais criados (assigned_to='{SEED_MARKER}').")
+
+
 def cleanup(session: Session) -> None:
     ids = session.execute(select(Lead.id).where(Lead.assigned_to == SEED_MARKER)).scalars().all()
     if not ids:
@@ -268,6 +362,7 @@ def main() -> None:
             cleanup(session)
         else:
             seed(session)
+            seed_historical(session)
 
 
 if __name__ == "__main__":

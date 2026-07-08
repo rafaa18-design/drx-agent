@@ -12,6 +12,9 @@ import logging
 import secrets
 from typing import Any
 
+import jwt
+from fastapi import HTTPException, Request
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -178,6 +181,29 @@ def has_required_scope(
         return False
 
     return bool(set(user_scopes) & set(required_scopes))
+
+
+def get_current_username(request: Request) -> str:
+    """Dependency de auth para rotas sob /api/ — o JWTAuthMiddleware ignora
+    esse prefixo (rotas do CRM), então as rotas que exigem identidade real
+    (ex: OAuth do Calendar) precisam validar o token explicitamente aqui.
+    """
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        raise HTTPException(status_code=401, detail='Missing or invalid Authorization header')
+
+    token = auth_header.split(' ', 1)[1]
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail='Token has expired')
+    except jwt.InvalidTokenError as e:
+        raise HTTPException(status_code=401, detail=f'Invalid token: {e}')
+
+    username = payload.get('sub')
+    if not username:
+        raise HTTPException(status_code=401, detail='Token missing subject')
+    return username
 
 
 def get_scopes_from_token(token_payload: dict[str, Any]) -> list[str]:
