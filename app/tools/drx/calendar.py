@@ -121,10 +121,18 @@ async def book_appointment(
     run_context: RunContext,
     slot_datetime: str,
     client_name: str,
-    channel: str = "meet",
+    channel: str,
     appointment_type: str = "initial_consultation",
 ) -> str:
     """Cria evento no Google Calendar e registra o agendamento no CRM.
+
+    IMPORTANTE — antes de chamar esta tool, pergunte ao cliente se ele prefere
+    reunião por VÍDEO (Google Meet) ou uma ligação só pelo WHATSAPP. NÃO
+    assuma "meet" por padrão. Defina channel de acordo com a resposta dele:
+    - Cliente prefere vídeo → channel="meet" (aí sim precisa do e-mail dele
+      antes — veja save_client_email).
+    - Cliente prefere só WhatsApp → channel="whatsapp" (não precisa de e-mail,
+      não pergunte).
 
     Use após o cliente confirmar o horário desejado.
     O lead_id é obtido automaticamente da sessão.
@@ -132,7 +140,7 @@ async def book_appointment(
     Args:
         slot_datetime: Data e hora ISO exata retornada por check_availability (ex: 2026-05-23T09:00:00). NUNCA construa esse valor manualmente — copie o slot_iso do resultado de check_availability.
         client_name: Nome completo do cliente.
-        channel: Canal da reunião — "meet" para Google Meet, "whatsapp" para WhatsApp.
+        channel: Canal da reunião — "meet" para Google Meet (vídeo), "whatsapp" para ligação só por WhatsApp. Escolha com base no que o cliente respondeu, nunca use o padrão sem perguntar.
         appointment_type: Tipo de consulta (initial_consultation, follow_up).
 
     Returns:
@@ -140,6 +148,13 @@ async def book_appointment(
     """
     import os
     from datetime import datetime as _dt
+
+    if channel not in ("meet", "whatsapp"):
+        raise RetryAgentRun(
+            f"channel='{channel}' inválido. Use exatamente 'meet' (cliente prefere vídeo) "
+            f"ou 'whatsapp' (cliente prefere ligação só por WhatsApp) — pergunte ao cliente "
+            f"se ainda não sabe qual ele prefere."
+        )
 
     # Reunião por vídeo precisa do e-mail do cliente ANTES de confirmar — é
     # esse e-mail que o Google usa para mandar o convite com o link do Meet.
