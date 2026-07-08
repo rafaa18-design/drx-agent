@@ -126,21 +126,20 @@ async def book_appointment(
 ) -> str:
     """Cria evento no Google Calendar e registra o agendamento no CRM.
 
-    IMPORTANTE — antes de chamar esta tool, pergunte ao cliente se ele prefere
-    reunião por VÍDEO (Google Meet) ou uma ligação só pelo WHATSAPP. NÃO
-    assuma "meet" por padrão. Defina channel de acordo com a resposta dele:
-    - Cliente prefere vídeo → channel="meet" (aí sim precisa do e-mail dele
-      antes — veja save_client_email).
-    - Cliente prefere só WhatsApp → channel="whatsapp" (não precisa de e-mail,
-      não pergunte).
+    Use só depois que o cliente já confirmou um horário de check_availability —
+    é o último passo do agendamento, não algo para antecipar no início da
+    conversa. Nesse momento (e só nesse momento), pergunte se ele prefere
+    vídeo (Google Meet) ou uma ligação só pelo WhatsApp, e defina channel de
+    acordo com a resposta:
+    - Vídeo → channel="meet" (precisa do e-mail dele antes — veja save_client_email).
+    - Só WhatsApp → channel="whatsapp" (não precisa de e-mail, não pergunte).
 
-    Use após o cliente confirmar o horário desejado.
     O lead_id é obtido automaticamente da sessão.
 
     Args:
         slot_datetime: Data e hora ISO exata retornada por check_availability (ex: 2026-05-23T09:00:00). NUNCA construa esse valor manualmente — copie o slot_iso do resultado de check_availability.
         client_name: Nome completo do cliente.
-        channel: Canal da reunião — "meet" para Google Meet (vídeo), "whatsapp" para ligação só por WhatsApp. Escolha com base no que o cliente respondeu, nunca use o padrão sem perguntar.
+        channel: Canal da reunião — "meet" para Google Meet (vídeo), "whatsapp" para ligação só por WhatsApp. Escolha com base no que o cliente respondeu nessa etapa final, nunca herde um valor sem perguntar.
         appointment_type: Tipo de consulta (initial_consultation, follow_up).
 
     Returns:
