@@ -89,8 +89,8 @@ class CalendarService:
 
                 # Coluna scheduled_at é timezone-aware — compara aware com aware
                 # (naive vs aware quebra silenciosamente e deixa passar slot ocupado)
-                day_start_utc = datetime.combine(target, time(0, 0), tzinfo=TIMEZONE).astimezone(_utc)
-                day_end_utc   = datetime.combine(target, time(23, 59), tzinfo=TIMEZONE).astimezone(_utc)
+                day_start_utc = datetime.combine(target, time(0, 0), tzinfo=TIMEZONE).astimezone(_utc.utc)
+                day_end_utc   = datetime.combine(target, time(23, 59), tzinfo=TIMEZONE).astimezone(_utc.utc)
 
                 async with AsyncSessionLocal() as db:
                     result = await db.execute(
@@ -107,7 +107,7 @@ class CalendarService:
                             continue
                         # Trata tanto naive (UTC do banco) quanto aware
                         if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=_utc)
+                            dt = dt.replace(tzinfo=_utc.utc)
                         booked.add(dt.astimezone(TIMEZONE).strftime("%H:%M"))
 
                     available = [s for s in available if s not in booked]

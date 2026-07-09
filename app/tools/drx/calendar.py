@@ -148,6 +148,13 @@ async def book_appointment(
     import os
     from datetime import datetime as _dt
 
+    logger.info(
+        "book_appointment chamado: slot=%s client_name=%s channel=%s phone_session=%s db_lead_id=%s",
+        slot_datetime, client_name, channel,
+        run_context.session_state.get("phone"),
+        run_context.session_state.get("db_lead_id"),
+    )
+
     if channel not in ("meet", "whatsapp"):
         raise RetryAgentRun(
             f"channel='{channel}' inválido. Use exatamente 'meet' (cliente prefere vídeo) "
@@ -286,6 +293,10 @@ async def book_appointment(
             await db.refresh(appt)
 
             appt_id = appt.id
+            logger.info(
+                "book_appointment OK: appt_id=%s lead_id=%s phone=%s channel=%s scheduled_at=%s",
+                appt_id, lead.id, lead.phone, channel, _parsed.isoformat(),
+            )
 
         run_context.session_state["last_appointment"] = {
             "id": appt_id,

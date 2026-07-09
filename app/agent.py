@@ -541,6 +541,7 @@ async def run_agent_loop(
                         if e.message
                         else 'Error: please retry with corrected parameters.'
                     )
+                    logger.warning(f'RetryAgentRun em {tool_name}: {result}')
                     tool_span.update(output=result, level='WARNING')
                 except StopAgentRun as e:
                     result = e.message or ''
