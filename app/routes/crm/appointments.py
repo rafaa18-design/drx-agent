@@ -82,12 +82,21 @@ async def list_appointments(
     db: AsyncSession = Depends(get_db),
 ):
     """Lista agendamentos com filtros, incluindo nome e telefone do lead."""
+    from sqlalchemy import case
     from sqlalchemy.orm import joinedload
 
+    # Ordem de agenda: próxima reunião a acontecer primeiro (futuras em ordem
+    # crescente), depois as passadas (mais recente que passou primeiro).
+    now = datetime.now(timezone.utc)
+    is_future = Appointment.scheduled_at >= now
     q = (
         select(Appointment)
         .options(joinedload(Appointment.lead))
-        .order_by(Appointment.scheduled_at.desc())
+        .order_by(
+            case((is_future, 0), else_=1),
+            case((is_future, Appointment.scheduled_at)).asc(),
+            case((~is_future, Appointment.scheduled_at)).desc(),
+        )
     )
 
     if status:
