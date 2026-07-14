@@ -33,13 +33,23 @@ def _client_config() -> dict:
 
 
 def build_flow():
-    """Monta o Flow OAuth em memória — sem precisar de client_secret.json em disco."""
+    """Monta o Flow OAuth em memória — sem precisar de client_secret.json em disco.
+
+    autogenerate_code_verifier=False: desabilita o PKCE auto-gerado pela lib.
+    O PKCE exigiria que o mesmo code_verifier gerado em /start (uma request)
+    sobrevivesse até /callback (outra request, outro processo) — como cada
+    chamada cria um Flow novo, isso sempre resultava em "Missing code
+    verifier" do Google. PKCE protege clientes publicos (mobile/SPA) que nao
+    tem como guardar segredo; aqui e um cliente confidencial (client_secret
+    + state validado via Redis), entao nao e necessario.
+    """
     from google_auth_oauthlib.flow import Flow
 
     return Flow.from_client_config(
         _client_config(),
         scopes=SCOPES,
         redirect_uri=os.environ["GOOGLE_OAUTH_REDIRECT_URI"],
+        autogenerate_code_verifier=False,
     )
 
 
