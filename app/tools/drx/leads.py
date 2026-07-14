@@ -191,24 +191,24 @@ def _is_valid_phone(value: str) -> bool:
 
 
 @tool
-async def get_lead_context(run_context: RunContext, phone: str) -> str:
-    """Recupera o contexto completo de um lead pelo número de telefone.
+async def get_lead_context(run_context: RunContext) -> str:
+    """Recupera o contexto completo do lead desta conversa no CRM.
 
-    Use na PRIMEIRA mensagem para verificar se é cliente da casa.
-
-    Args:
-        phone: Número de telefone no formato internacional (ex: +5511999999999).
+    Use na PRIMEIRA mensagem para verificar se é cliente da casa. O telefone
+    é identificado automaticamente pelo canal — não pergunte nem invente
+    um número, esta tool não recebe telefone como parâmetro.
 
     Returns:
         Dados do lead, histórico resumido e status no CRM.
     """
-    # Valida se é um telefone real — se não, usa o session_id como fallback
+    # O telefone real é o identificador da conversa (conversation_id/session_id)
+    # — NUNCA pedimos isso ao modelo, porque ele não tem como saber o número
+    # de verdade e acaba inventando um (bug real observado em produção: o
+    # modelo "chutou" um telefone válido-mas-falso, criando um lead fantasma
+    # desconectado da conversa real).
+    phone = run_context.session_id or ""
     if not _is_valid_phone(phone):
-        sid = run_context.session_id or ""
-        if _is_valid_phone(sid):
-            phone = sid
-        else:
-            return "Nenhum telefone válido identificado. Continue o atendimento normalmente."
+        return "Nenhum telefone válido identificado. Continue o atendimento normalmente."
 
     # Salva o telefone na sessão para uso posterior
     run_context.session_state["phone"] = phone

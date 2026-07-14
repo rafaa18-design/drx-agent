@@ -15,6 +15,7 @@ Optimizations:
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -269,6 +270,30 @@ def _tool_call_key(name: str, args: dict) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
+class _NoOpSpan:
+    """Substituto do span do Langfuse quando não configurado — mesma
+    interface (.update), sem operação nenhuma."""
+
+    def update(self, **kwargs):
+        pass
+
+
+@contextlib.contextmanager
+def _noop_span():
+    yield _NoOpSpan()
+
+
+def _langfuse_configured() -> bool:
+    """Evita chamar get_client() do SDK do Langfuse quando nao ha credencial —
+    o SDK loga um warning TODA VEZ que e chamado sem public_key configurado,
+    o que inunda os logs (uma vez por LLM call + uma vez por tool call)."""
+    return bool(
+        settings.LANGFUSE_ENABLED
+        and settings.LANGFUSE_PUBLIC_KEY
+        and settings.LANGFUSE_SECRET_KEY
+    )
+
+
 async def _traced_completion(
     model: str,
     messages: list[dict],
@@ -277,7 +302,17 @@ async def _traced_completion(
     max_tokens: int,
     iteration: int,
 ):
-    """Wrap litellm.acompletion with Langfuse observation."""
+    """Wrap litellm.acompletion with Langfuse observation (se configurado)."""
+    if not _langfuse_configured():
+        return await litellm.acompletion(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice='auto' if tools else None,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
     from langfuse import get_client as _get_lf
 
     lf = _get_lf()
@@ -521,14 +556,17 @@ async def run_agent_loop(
                 )
                 return tc.id, tool_call_cache[cache_key], False
 
-            # Execute the tool with Langfuse span
-            lf = _get_lf()
+            # Execute the tool with Langfuse span (se configurado)
             should_stop = False
-            with lf.start_as_current_observation(
-                as_type='span',
-                name=f'tool-{tool_name}',
-                input=args,
-            ) as tool_span:
+            if _langfuse_configured():
+                span_cm = _get_lf().start_as_current_observation(
+                    as_type='span',
+                    name=f'tool-{tool_name}',
+                    input=args,
+                )
+            else:
+                span_cm = _noop_span()
+            with span_cm as tool_span:
                 try:
                     result = await tools.execute(tool_name, args, run_context)
                     result = _truncate_tool_output(result)
