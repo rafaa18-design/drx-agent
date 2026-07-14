@@ -136,6 +136,12 @@ async def book_appointment(
 
     O lead_id é obtido automaticamente da sessão.
 
+    Depois que esta tool retornar sucesso, é o ÚLTIMO passo do atendimento —
+    responda IMEDIATAMENTE com a confirmação do agendamento (dia/hora/canal).
+    Nunca pergunte mais detalhes do caso, nunca repita etapas anteriores
+    (seguidores, dor, print, etc.) depois de um agendamento bem-sucedido,
+    mesmo que pareça uma boa transição de conversa — isso já foi concluído.
+
     Args:
         slot_datetime: Data e hora ISO exata retornada por check_availability (ex: 2026-05-23T09:00:00). NUNCA construa esse valor manualmente — copie o slot_iso do resultado de check_availability.
         client_name: Nome completo do cliente.
