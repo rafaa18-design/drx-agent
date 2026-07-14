@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 TIMEZONE = ZoneInfo("America/Sao_Paulo")
 BUSINESS_START = time(8, 0)
 BUSINESS_END = time(18, 0)
-SLOT_INTERVAL_MINUTES = 30
+SLOT_INTERVAL_MINUTES = 60
 
 _MOCK = os.environ.get("MOCK_SERVICES", "false").lower() == "true"
 
