@@ -41,6 +41,15 @@ class RunRequest(BaseModel):
     received_at: float | None = Field(
         None, description='Unix timestamp when the message was received by the connector'
     )
+    ad_referral: dict | None = Field(
+        None,
+        description=(
+            'Metadado de referral de anuncio (Click to WhatsApp Ads), se o conector '
+            'conseguir extrair do payload bruto do WhatsApp — ex: {"source_type": "ad", '
+            '"ctwa_clid": "...", "headline": "...", "body": "..."}. Opcional: nem todo '
+            'provedor de WhatsApp expoe esse dado.'
+        ),
+    )
 
 
 # =============================================================================

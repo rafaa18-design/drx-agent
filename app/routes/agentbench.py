@@ -446,6 +446,36 @@ def extract_actions_from_response(response: AgentResponse) -> list[ActionTaken]:
     return actions
 
 
+async def _should_engage_paid_traffic_only(
+    conversation_id: str,
+    session_state: dict[str, Any],
+    text_message: str,
+    ad_referral: dict | None,
+) -> bool:
+    """Regra de negocio: Tiago so engaja automaticamente leads genuinamente
+    novos que vieram de anuncio (trafego pago).
+
+    A decisao e tomada uma unica vez por conversa e guardada em
+    session_state — assim uma conversa de trafego pago ja em andamento
+    continua normalmente nas mensagens seguintes (nao reavalia a cada
+    turno), e um lead organico que foi ignorado na primeira mensagem
+    continua ignorado nas proximas, sem precisar bater no banco de novo.
+    """
+    if 'is_paid_traffic_lead' in session_state:
+        return bool(session_state['is_paid_traffic_lead'])
+
+    from app.services.crm_sync import lead_exists
+    from app.services.ctwa_detection import is_paid_traffic_opener
+
+    if await lead_exists(conversation_id):
+        session_state['is_paid_traffic_lead'] = False
+        return False
+
+    decision = is_paid_traffic_opener(text_message, ad_referral)
+    session_state['is_paid_traffic_lead'] = decision
+    return decision
+
+
 @dataclass
 class AgentRunResult:
     """Result from agent execution."""
@@ -524,6 +554,35 @@ async def execute_agent(
 
         # Get session state from Redis
         session_state = await get_session_state(conversation_id)
+
+        # Gate de trafego pago: Tiago so responde a primeira mensagem de um
+        # lead genuinamente novo que veio de um anuncio (Click to WhatsApp
+        # Ads). Leads ja conhecidos do CRM (qualquer origem) e leads novos
+        # sem sinal de anuncio ficam sem resposta automatica — a conversa
+        # ainda aparece no CRM (sync_conversation_turn roda normalmente),
+        # so nao gera resposta do agente.
+        if not await _should_engage_paid_traffic_only(
+            conversation_id, session_state, text_message, request.ad_referral
+        ):
+            logger.info(
+                f'Mensagem ignorada (fora do escopo trafego pago): {conversation_id}'
+            )
+            from app.services.crm_sync import sync_conversation_turn
+
+            await sync_conversation_turn(conversation_id, text_message, '', session_state)
+            await update_session_state(conversation_id, session_state)
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            return AgentRunResult(
+                response=None,
+                instructions='',
+                session_state=session_state,
+                latency_ms=latency_ms,
+                input_tokens=0,
+                output_tokens=0,
+                text_message=text_message,
+                actions=[],
+                error=None,
+            )
 
         t0 = time.perf_counter()
         template = await get_agent_instructions()

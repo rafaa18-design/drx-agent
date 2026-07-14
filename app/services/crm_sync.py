@@ -19,6 +19,28 @@ def _is_valid_phone(value: str) -> bool:
     return len(re.sub(r"\D", "", value or "")) >= 8
 
 
+async def lead_exists(phone: str) -> bool:
+    """Verifica se ja existe um lead cadastrado para esse telefone.
+
+    Fail-open: em caso de erro de banco, retorna False (trata como lead
+    novo) — o gate de trafego pago que usa esta funcao ainda vai exigir o
+    sinal de anuncio na primeira mensagem, entao um falso "nao existe" aqui
+    nao reabre a porta pra leads organicos, so evita bloquear um lead
+    legitimo por uma falha transitoria de banco.
+    """
+    if not _is_valid_phone(phone):
+        return False
+    try:
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select as sa_select
+
+            res = await db.execute(sa_select(Lead.id).where(Lead.phone == phone))
+            return res.scalar_one_or_none() is not None
+    except Exception as e:
+        logger.warning("Erro ao verificar lead existente: %s", e)
+        return False
+
+
 async def sync_conversation_turn(
     conversation_id: str,
     user_text: str,
