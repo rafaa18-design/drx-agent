@@ -562,7 +562,7 @@ async def execute_agent(
         # ainda aparece no CRM (sync_conversation_turn roda normalmente),
         # so nao gera resposta do agente.
         if not await _should_engage_paid_traffic_only(
-            conversation_id, session_state, text_message, request.ad_referral
+            conversation_id, session_state, text_message, getattr(request, "ad_referral", None)
         ):
             logger.info(
                 f'Mensagem ignorada (fora do escopo trafego pago): {conversation_id}'
