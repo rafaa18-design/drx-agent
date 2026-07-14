@@ -104,6 +104,10 @@ async def check_availability(run_context: RunContext, date: str, duration_minute
         # Guarda os slots válidos na sessão — book_appointment valida contra essa lista
         # (o modelo às vezes troca mês/dia ao copiar o slot_iso de cabeça).
         run_context.session_state["available_slots"] = [f"{date}T{s}:00" for s in slots]
+        logger.info(
+            "check_availability: date=%s lawyer_id=%s phone=%s slots=%s",
+            date, getattr(lawyer, "id", None), run_context.session_state.get("phone"), slots,
+        )
 
         linhas = [f"ANO ATUAL: {ano_atual} — use este ano em todos os agendamentos."]
         linhas.append(f"DATA: {dia_semana}, {data_formatada} ({date})")
@@ -262,6 +266,37 @@ async def book_appointment(
             run_context.session_state["db_lead_id"] = lead.id
 
             lawyer = await _get_default_lawyer(db)
+
+            # Revalida o horário NA HORA de gravar, direto no banco — a lista
+            # de available_slots que o check_availability devolveu pode estar
+            # desatualizada (outro atendimento reservou esse horário nesse
+            # meio-tempo, ou o modelo insistiu num horário já ocupado). Isso
+            # é a última linha de defesa contra choque de horário: NUNCA
+            # cria um agendamento sobrepondo outro do mesmo advogado.
+            from datetime import timedelta as _timedelta
+            from zoneinfo import ZoneInfo as _TZ
+
+            new_start = _parsed
+            new_end = _parsed + _timedelta(minutes=duration)
+            conflict_res = await db.execute(
+                sa_select(ApptModel).where(
+                    ApptModel.lawyer_id == (lawyer.id if lawyer else None),
+                    ApptModel.status != "cancelled",
+                    ApptModel.scheduled_at >= new_start - _timedelta(hours=6),
+                    ApptModel.scheduled_at <= new_end + _timedelta(hours=6),
+                )
+            )
+            for other in conflict_res.scalars():
+                other_start = other.scheduled_at
+                if other_start.tzinfo is None:
+                    other_start = other_start.replace(tzinfo=_TZ("America/Sao_Paulo"))
+                other_end = other_start + _timedelta(minutes=other.duration_minutes or 60)
+                if new_start < other_end and new_end > other_start:
+                    raise RetryAgentRun(
+                        "ERRO: esse horário acabou de ser ocupado por outro agendamento. "
+                        "Chame check_availability novamente para essa mesma data e ofereça "
+                        "ao cliente um horário diferente — NÃO insista neste mesmo horário."
+                    )
 
             appt = ApptModel(
                 lead_id=lead.id,
