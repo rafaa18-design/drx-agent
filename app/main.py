@@ -12,6 +12,7 @@ This module sets up a FastAPI application with:
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from starlette.middleware.cors import CORSMiddleware
@@ -49,6 +50,26 @@ async def lifespan(app: FastAPI):
         logger.info('Redis connected')
     except Exception as e:
         logger.warning(f'Redis not available: {e}')
+
+    # Roda "alembic upgrade head" automaticamente no startup — evita depender
+    # de alguem rodar isso manualmente em cada ambiente novo (Render, Cloud
+    # Run, etc), o que é inviável quando o banco só é alcançável via socket
+    # interno (ex: Cloud SQL) e não da máquina local de quem está configurando.
+    # Roda em thread separada porque o alembic usa asyncio.run() internamente,
+    # que não pode ser chamado de dentro de um loop de eventos já em execução
+    # (o lifespan do FastAPI já está rodando um).
+    try:
+        def _run_migrations() -> None:
+            from alembic import command
+            from alembic.config import Config
+
+            cfg = Config(str(Path(__file__).resolve().parent.parent / 'alembic.ini'))
+            command.upgrade(cfg, 'head')
+
+        await asyncio.to_thread(_run_migrations)
+        logger.info('Migrações do banco aplicadas (alembic upgrade head)')
+    except Exception as e:
+        logger.warning(f'Falha ao rodar migrações automáticas: {e}')
 
     # Pre-load prompt into cache
     try:

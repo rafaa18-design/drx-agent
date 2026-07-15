@@ -58,6 +58,14 @@ COPY --chown=appuser:appgroup app/ ./app/
 # Copy prompt files
 COPY --chown=appuser:appgroup prompt/ ./prompt/
 
+# Migrações do banco (alembic.ini + scripts) — necessário para o app
+# conseguir rodar "alembic upgrade head" sozinho no startup (ver
+# app/main.py lifespan). Sem isso, ambientes onde o banco não é
+# alcançável da máquina local (ex: Cloud SQL via socket unix) nunca
+# recebiam as migrações.
+COPY --chown=appuser:appgroup alembic.ini ./alembic.ini
+COPY --chown=appuser:appgroup alembic/ ./alembic/
+
 # Set environment variables
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
