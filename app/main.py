@@ -66,7 +66,11 @@ async def lifespan(app: FastAPI):
             cfg = Config(str(Path(__file__).resolve().parent.parent / 'alembic.ini'))
             command.upgrade(cfg, 'head')
 
-        await asyncio.to_thread(_run_migrations)
+        logger.info('Iniciando alembic upgrade head...')
+        # Timeout evita travar o startup pra sempre se a conexao com o banco
+        # (ex: socket do Cloud SQL) nao completar — assim sempre logamos
+        # sucesso ou erro claro, nunca ficamos travados em silencio.
+        await asyncio.wait_for(asyncio.to_thread(_run_migrations), timeout=20.0)
         logger.info('Migrações do banco aplicadas (alembic upgrade head)')
     except Exception as e:
         logger.warning(f'Falha ao rodar migrações automáticas: {e}')
